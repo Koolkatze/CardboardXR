@@ -39,7 +39,9 @@ namespace CardboardXR.Hands
     //   1. the palm's settings gear, while it shows, opens the settings panel;
     //   2. a button under the gaze is clicked, so panels work in every demo whatever it does with
     //      pinches (Orb Rush takes all of them during a round, and was swallowing the panel's);
-    //   3. the scene's demo (Handler) is asked, unless the settings panel is open;
+    //   3. what the gaze is on, if it takes pinches itself (an IPinchHandler on it or above it, such as
+    //      a phone app's screen, which drags with the pinch), then the scene's demo (Handler), unless the
+    //      settings panel is open;
     //   4. something the hand's ray is on is picked up (6DoF);
     //   5. otherwise the gaze clicks what it's on, except a placed object in 6DoF, which only the
     //      hand takes, so looking at a cube and pinching elsewhere doesn't remove it by surprise.
@@ -84,10 +86,23 @@ namespace CardboardXR.Hands
             End();
             var target = gaze.Target;
             var handler = Handler;
+            var targetHandler = target != null ? target.GetComponentInParent<IPinchHandler>() : null;
+            IPinchHandler taker = null;
+            System.Func<bool> takes = null;
+            if (targetHandler != null || handler != null)
+            {
+                takes = () =>
+                {
+                    if (targetHandler != null && targetHandler.TryBeginPinch(target, source))
+                        taker = targetHandler;
+                    else if (handler != null && handler.TryBeginPinch(target, source))
+                        taker = handler;
+                    return taker != null;
+                };
+            }
             var now = Time.unscaledTime;
             var lockedOut = now - s_LastClick < k_ClickLockoutSeconds;
-            var route = Order(!lockedOut && SettingsSummoner.TryConsumePinch(), SettingsSummoner.IsPanelOpen, IsButton(target),
-                handler != null ? () => handler.TryBeginPinch(target, source) : null,
+            var route = Order(!lockedOut && SettingsSummoner.TryConsumePinch(), SettingsSummoner.IsPanelOpen, IsButton(target), takes,
                 canGrab, source == PinchSource.Hand && target != null && target.GetComponentInParent<PlacedObject>() != null, lockedOut);
             if (route is PinchRoute.Settings or PinchRoute.Button or PinchRoute.Click)
                 s_LastClick = now;
@@ -101,7 +116,7 @@ namespace CardboardXR.Hands
                     gaze.TriggerUp();
                     break;
                 case PinchRoute.Demo:
-                    s_Claimed = handler;
+                    s_Claimed = taker;
                     break;
                 case PinchRoute.Ignored when lockedOut:
                     Debug.Log($"[Pinch] {source} pinch {(now - s_LastClick) * 1000f:F0} ms after the last click: taken as the same pinch, ignored");

@@ -57,6 +57,56 @@ namespace CardboardXR.Stereo.Tests
         }
 
         [Test]
+        public void ThePhonesAppsAreLaidOutAsPagedFromTheStart()
+        {
+            // While the list loads, and with fewer apps than a page, the Android section already has room
+            // for the arrows and the page row, so it keeps its size when the list comes in.
+            foreach (var apps in new[] { 0, 4, 6, 7, 150 })
+                Assert.AreEqual(AppLibrary.Size(7), AppLibrary.Size(AppLibrary.AndroidLayoutCount(apps)), $"{apps} apps");
+            Assert.AreEqual(150, AppLibrary.AndroidLayoutCount(150));
+            // Laid out that way, a phone's few apps sit where a full page's first ones would.
+            Assert.AreEqual(AppLibrary.CellPosition(0, 150), AppLibrary.CellPosition(0, AppLibrary.AndroidLayoutCount(2)));
+        }
+
+        [Test]
+        public void ManyPagesSayWhichPageInsteadOfDots()
+        {
+            Assert.IsTrue(AppLibrary.UsesPageDots(2));
+            Assert.IsTrue(AppLibrary.UsesPageDots(AppLibrary.k_MaxPageDots));
+            Assert.IsFalse(AppLibrary.UsesPageDots(AppLibrary.k_MaxPageDots + 1));
+            Assert.AreEqual("3 of 25", AppLibrary.PageLabel(2, 25));
+        }
+
+        [Test]
+        public void TheRailSitsBesideTheLibrary()
+        {
+            foreach (var withLandscape in new[] { false, true })
+            {
+                var rail = AppLibrary.RailSize(withLandscape);
+                foreach (var apps in new[] { 6, 7 })
+                {
+                    var size = AppLibrary.Size(apps);
+                    var position = AppLibrary.RailPosition(size, rail);
+                    Assert.AreEqual(-size.x / 2f - AppLibrary.k_RailGap, position.x + rail.x / 2f, 1e-3f, $"{apps} apps");
+                    Assert.AreEqual(0f, position.y);
+                }
+                // Its items inside it, top to bottom, none over another.
+                var items = withLandscape ? 3 : 2;
+                for (var i = 0; i < items; i++)
+                {
+                    var y = AppLibrary.RailItemY(i, withLandscape);
+                    Assert.LessOrEqual(y + AppLibrary.k_RailItemHeight / 2f, rail.y / 2f + 1e-3f, $"item {i}");
+                    Assert.GreaterOrEqual(y - AppLibrary.k_RailItemHeight / 2f, -rail.y / 2f - 1e-3f, $"item {i}");
+                    if (i > 0)
+                        Assert.LessOrEqual(y + AppLibrary.k_RailItemHeight / 2f,
+                            AppLibrary.RailItemY(i - 1, withLandscape) - AppLibrary.k_RailItemHeight / 2f + 1e-3f, $"item {i}");
+                }
+            }
+            // With the Landscape switch it's still no taller than the library, so it doesn't reach the panel below.
+            Assert.LessOrEqual(AppLibrary.RailSize(true).y, AppLibrary.Size(7).y);
+        }
+
+        [Test]
         public void FewerRowsMakeMorePages()
         {
             Assert.AreEqual(3, AppLibrary.PerPage(1));

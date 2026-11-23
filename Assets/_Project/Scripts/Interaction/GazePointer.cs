@@ -60,6 +60,12 @@ namespace CardboardXR.Interaction
         // A ray to point with instead of the head's forward line.
         public Ray? RayOverride { get; set; }
 
+        // The ray pointing now: the override's, or the head's forward line.
+        public Ray CurrentRay => RayOverride ?? new Ray(transform.position, transform.forward);
+
+        // A press held on something that follows the gaze (IGazeDrag).
+        bool Dragging => m_Held && m_Pressed != null && m_Pressed.TryGetComponent<IGazeDrag>(out _);
+
         PointerEventData EventData =>
             m_EventData ??= new PointerEventData(EventSystem.current) { button = PointerEventData.InputButton.Left };
 
@@ -73,13 +79,15 @@ namespace CardboardXR.Interaction
         {
             UpdateGaze();
             UpdateTrigger();
+            if (Dragging && m_Pressed.TryGetComponent<IGazeDrag>(out var drag))
+                drag.OnGazeDrag(CurrentRay);
         }
 
         // Finds what the head points at, sends enter and exit events when that changes, and moves the
         // reticle onto it.
         public void UpdateGaze()
         {
-            var ray = RayOverride ?? new Ray(transform.position, transform.forward);
+            var ray = CurrentRay;
             var found = Raycast(ray, out var result);
             SetTarget(found ? result.gameObject : null, result);
             TargetDistance = found ? result.distance : m_MaxDistance;
@@ -160,7 +168,7 @@ namespace CardboardXR.Interaction
                     TriggerDown();
             }
 
-            if (m_Held && !m_ClickCancelled && Time.unscaledTime - m_PressTime >= m_HoldSeconds)
+            if (m_Held && !m_ClickCancelled && Time.unscaledTime - m_PressTime >= m_HoldSeconds && !Dragging)
             {
                 // A hold replaces the click.
                 m_ClickCancelled = true;

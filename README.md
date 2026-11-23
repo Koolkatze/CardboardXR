@@ -126,6 +126,8 @@ phone's home screen. The app logs the options it received at startup (`[Stereo] 
 | `uiScale N` | Size of the Material UI in percent of Android XR's dp sizes (default 160, for phone viewers' lower resolution) |
 | `brightness N` | Screen brightness while the app is in front, in percent (default 90; 0 leaves it alone) |
 | `libraryRows N` | Rows of apps on each page of the app library, 1 to 4 (default 2). `1` shows paging with only a few demos |
+| `landscapeApps 0` | Android: open the phone's apps the way they choose, rather than in landscape when they can turn (`1` the other way); overrides the *Landscape* switch for the run |
+| `appScreenFps N` | Android: frames a second a phone app's screen in XR takes, 1 to 60 (default 30); each is a few MB to copy |
 
 ## Using the app
 
@@ -134,12 +136,34 @@ phone's home screen. The app logs the options it received at startup (`[Stereo] 
   full-screen phone view; *Open settings* opens the settings panel.
 - **The app library**, above the settings panel, has an icon for the lobby and each demo: look at
   one to see what it is, and pinch or tap to open it, from anywhere, so you can go straight from one
-  demo to another. It shows six apps a page; with more, arrows on either side turn the page. *Apps*
-  on the settings panel shows and hides it. The lobby is a checkerboard room
+  demo to another. It shows six apps a page; with more, arrows on either side turn the page. On
+  Android it also opens the phone's own apps (below). *Apps* on the settings panel shows and hides
+  it. The lobby is a checkerboard room
   to start from, and opens with the library showing. As the app starts, the lobby is in 6DoF
   passthrough and first scans your room: look around at the floor and any tables until it says it's
   done (or tap *Skip*), so the demos start with tracking running and surfaces found. Each demo switches on what it needs (6DoF,
   passthrough, hands) and leaving puts back what you had.
+- **The phone's own apps** (Android): a rail at the library's left switches between *XR* (the lobby
+  and demos) and *Android*, every app the phone's launcher shows, with its icon, in the launcher's
+  order. Pick one and it opens **on a screen in the scene**, in stereo like everything else, 2 m
+  ahead: look at it and tap the phone's screen (or pinch) to touch it there, hold and look along to
+  drag and scroll. Under it, *Back*, *Move here* and *Close*. An app that can turn gets a
+  **landscape** screen; one that only runs upright gets an upright one, and a landscape app stays
+  landscape. Looking at an app says which it is, and the rail's *Landscape* switch, in the Android
+  section, turns landscape off and on (it's kept). Its keyboard shows on its own screen.
+  - **This needs [Shizuku](https://shizuku.rikka.app/)**, which lends CardboardXR the rights adb has,
+    so it can make the app a virtual display of its own, as scrcpy does: install it, start it (with
+    *Wireless debugging* on Android 11 and later, no computer needed, or from the Mac with the `adb`
+    command its app shows), and allow CardboardXR when it asks, the first time you pick an app. The
+    app restarts on its screen, and closes with it. The library's tagline says whether apps will open
+    on a screen.
+  - **Without Shizuku** the app opens flat, over CardboardXR, on the phone's own screen. One that can
+    turn is kept in landscape while it's in front, which needs *Display over other apps*: the first
+    time, Settings opens at CardboardXR's switch (on Android 13 and later, after asking for
+    notifications), and the app opens when you come back. Landscape lets go when you return to
+    CardboardXR, when the screen goes off, or by tapping or swiping away the notification that shows
+    meanwhile. To allow it from the Mac instead:
+    `adb shell appops set com.brenpoly.cardboardxr SYSTEM_ALERT_WINDOW allow`.
 - **Input is gaze and pinch everywhere**: look at something and pinch in front of the camera to
   click it. A screen tap works too. The reticle turns light blue while the camera sees your hand.
   In 6DoF demos, hand tracking does it (and picks things up); in 3DoF, a lighter detector that only
@@ -194,9 +218,9 @@ On iOS, `ios_launch.sh` copies it to `$TMPDIR/cardboardxr/ios-session.log`.
 
 Lines are tagged by area: `[Pose]` head tracking, `[AR]` the AR session, `[Room]` surfaces and the
 floor, `[Anchor]` placed objects, `[Hands]` hand tracking and grabs, `[Pinch]` the pinch study,
-`[Passthrough]`, `[Gaze]` clicks, `[Frames]` and `[Hitch]` frame timing, `[Stereo]` setup, and
-`[Tracking]` the motion sensors. Most areas log a status line every five seconds. Warnings and
-errors are always kept.
+`[Passthrough]`, `[Gaze]` clicks, `[Frames]` and `[Hitch]` frame timing, `[Stereo]` setup,
+`[Tracking]` the motion sensors, and `[Apps]` the phone's apps opened from the library (never by
+name). Most areas log a status line every five seconds. Warnings and errors are always kept.
 
 ## Recording clips
 
@@ -225,8 +249,8 @@ trim it. In passthrough both eyes see the same image, so one eye is the whole ex
 
 EditMode tests cover the parts that don't need a device: lens distortion and viewer QR profiles,
 sensor and pose fusion, the camera clock, hand geometry, pinch detection, depth sampling and palm
-calibration, floor picking, passthrough, gaze pointing and anchoring. Each demo's own tests are in
-its folder, under `Tests`.
+calibration, floor picking, passthrough, gaze pointing and anchoring, the app library's layout, and
+which of the phone's apps open in landscape. Each demo's own tests are in its folder, under `Tests`.
 
 ## How it's built
 
@@ -243,7 +267,11 @@ Code is in `Assets/_Project/Scripts`, one assembly per area:
 - **Interaction** — gaze pointing and highlighting
 - **UI** — a Material Design for XR kit (Material 3's baseline dark scheme, Roboto, Material
   Icons) sized in Android XR's dp, which every scene's UI is built from
-- **Demos** — moving between the lobby and the demos, and what each demo needs from Core
+- **Demos** — moving between the lobby and the demos, what each demo needs from Core, and on
+  Android the phone's own apps: `Assets/Plugins/Android/CardboardXRApps.java` lists them, opens them
+  flat and holds landscape, and `CardboardXRScreen.java` with `CardboardXRScreenService.java` (run as
+  the shell user by Shizuku) puts one on a virtual display whose frames `AppScreen` shows in the
+  scene, and passes it the gaze's touches
 - **Tracking** — sensor fusion and filters with no Unity dependencies
 
 **The app is one Core scene with the lobby and demos loaded on top.** Core holds everything that
@@ -272,6 +300,9 @@ processed on the phone and never stored or sent anywhere. It goes online only wh
 - **Scanning a viewer's QR code**: short links on the code are followed over HTTPS, at most five
   redirects, until they reach a Cardboard viewer URL, as Google's Cardboard apps do.
 - **Google Drive videos** listed in `videos.txt`: each downloads from Google Drive on first play.
+
+On Android the app library lists the phone's apps, with their names and icons, to open them; the
+list is read on the phone and never stored or sent anywhere.
 
 Unity's analytics, crash reporting and engine diagnostics are off. The session log stays on the
 phone (in the app's own storage) and holds tracking and performance figures, nothing personal.

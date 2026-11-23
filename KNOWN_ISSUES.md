@@ -61,6 +61,45 @@ farther out still places one.
 They're passed by the scripts (intent extras on Android, environment variables on iOS), so opening
 the app from the phone's home screen uses the defaults.
 
+## Android
+
+### The phone's apps in XR need Shizuku, and haven't been tried on every phone
+
+Putting an app on a screen in the scene takes a virtual display that any app can open on, which only
+the system and the shell user (adb) may make. Shizuku lends CardboardXR the shell's rights; without
+it, apps open flat, on the phone's own screen, where each eye sees half of it. How the display, the
+app's start on it and its touches are done follows scrcpy's `--new-display`; parts of it are hidden
+Android interfaces that a phone maker can change, and the service falls back to the `am` and `input`
+commands when one is missing. Android 13 and later get a trusted display any app opens on; before,
+an app that doesn't allow being embedded may refuse.
+
+### What the screen in XR doesn't do
+
+Apps that protect their content (most streaming video, banking) show black, as in a screen
+recording. Opening an app stops it first, so one already running on the phone starts again on its
+screen. One screen at a time. Frames are copied through the CPU, up to `appScreenFps` (30) a
+second. Sound plays from the phone as usual. There's no keyboard of CardboardXR's own: an app's text
+fields use Android's, on the app's screen, typed by looking and tapping.
+
+### Flat, an app left by the home button stays in landscape
+
+Without Shizuku, Android tells an app nothing about which app is in front without the usage-access permission, so
+the landscape hold doesn't know when the app it was for is left. It ends when CardboardXR comes back
+to the front, when the screen goes off, or from its notification; until then, every app is turned
+to landscape, and upright-only ones are letterboxed. On Android 13 and later the notification only
+shows if notifications were allowed.
+
+### Which apps can turn is read from their launcher activity
+
+An app whose first activity can turn but whose later ones are fixed upright, or that turns itself
+upright in code, is letterboxed in landscape while it's held there. The *Landscape* switch on the
+library's rail opens apps as they choose instead.
+
+### Large screens may ignore it
+
+Android 16 ignores apps' orientation requests on screens 600 dp wide and over (tablets, unfolded
+foldables), which may include the overlay that holds landscape.
+
 ## iPhone 15 Pro
 
 ### 120 fps doesn't hold with hand tracking, or when the phone is hot
