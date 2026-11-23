@@ -37,6 +37,18 @@ namespace CardboardXR.Stereo.Tests
         }
 
         [Test]
+        public void WithoutShizukuTheScreenSaysWhatToDo()
+        {
+            StringAssert.Contains("isn't installed", AppScreen.NoticeFor(AppScreen.ShizukuState.Missing, false, "Player", ""));
+            StringAssert.Contains("isn't running", AppScreen.NoticeFor(AppScreen.ShizukuState.Missing, true, "Player", ""));
+            StringAssert.Contains("Allow CardboardXR", AppScreen.NoticeFor(AppScreen.ShizukuState.NotAllowed, true, "Player", ""));
+            StringAssert.Contains("Update Shizuku", AppScreen.NoticeFor(AppScreen.ShizukuState.TooOld, true, "Player", ""));
+            StringAssert.Contains("binder died", AppScreen.NoticeFor(AppScreen.ShizukuState.Error, true, "Player", "binder died"));
+            foreach (AppScreen.ShizukuState state in System.Enum.GetValues(typeof(AppScreen.ShizukuState)))
+                StringAssert.Contains("Player", AppScreen.NoticeFor(state, true, "Player", "x"));
+        }
+
+        [Test]
         public void AppsThatCanTurnGetALandscapeScreen()
         {
             Assert.IsTrue(AndroidApps.OpensInLandscape(AndroidApps.Fit.Turns, true));

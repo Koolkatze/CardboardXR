@@ -157,8 +157,10 @@ phone's home screen. The app logs the options it received at startup (`[Stereo] 
     command its app shows), and allow CardboardXR when it asks, the first time you pick an app. The
     app restarts on its screen, and closes with it. The library's tagline says whether apps will open
     on a screen.
-  - **Without Shizuku** the app opens flat, over CardboardXR, on the phone's own screen. One that can
-    turn is kept in landscape while it's in front, which needs *Display over other apps*: the first
+  - **Without Shizuku** (not installed, not running, or CardboardXR not allowed in it) the screen
+    says which, with *Try again*, *Shizuku* (its app, or its download page) and *Open flat*, which
+    opens the app over CardboardXR, on the phone's own screen. There, one that can turn is kept in
+    landscape while it's in front, which needs *Display over other apps*: the first
     time, Settings opens at CardboardXR's switch (on Android 13 and later, after asking for
     notifications), and the app opens when you come back. Landscape lets go when you return to
     CardboardXR, when the screen goes off, or by tapping or swiping away the notification that shows

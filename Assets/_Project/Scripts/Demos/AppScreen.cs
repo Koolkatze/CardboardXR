@@ -14,7 +14,9 @@ namespace CardboardXR.Demos
     // (the app's back key), Move here (in front of you again) and Close.
     //   Making the display and opening an app on it takes the shell user's rights, which Shizuku lends
     //   (CardboardXRScreen.java and CardboardXRScreenService.java do the Android side), so the screen
-    //   needs Shizuku running and CardboardXR allowed in it; without, AndroidApps opens apps flat.
+    //   needs Shizuku running and CardboardXR allowed in it. Without, the screen shows why instead
+    //   (ShowNotice), with Try again, Open flat (over CardboardXR, on the phone's own screen) and
+    //   Shizuku (its app, to start it or allow CardboardXR, or its download page).
     //   Frames: the Java side copies each new frame into one of three direct buffers, and this uploads
     //   the newest it hasn't had straight from that memory into the texture (no copy through C#), up to
     //   AppScreenFps a second. The display is k_LongSidePixels by k_ShortSidePixels at k_Dpi: 640x360 dp,
@@ -29,6 +31,7 @@ namespace CardboardXR.Demos
             NotAllowed = 1,
             Ready = 2,
             TooOld = 3,
+            Error = 4,
         }
 
         // MotionEvent's actions and KeyEvent.KEYCODE_BACK.
@@ -61,6 +64,10 @@ namespace CardboardXR.Demos
         bool m_Landscape;
         bool m_Open;
         bool m_Showing;
+        // Showing why the app can't open here, rather than the app.
+        bool m_Notice;
+        AndroidApps.App m_App;
+        RectTransform m_NoticeButtons;
         string m_Label;
         string m_LastStatus;
         Vector2 m_LastTouch;
@@ -97,7 +104,65 @@ namespace CardboardXR.Demos
             new(Mathf.Clamp01(fraction.x) * display.x, (1f - Mathf.Clamp01(fraction.y)) * display.y);
 
         // Whether Shizuku is running and lets CardboardXR use it; Missing off a phone.
-        public static ShizukuState Shizuku => (ShizukuState)Call<int>("shizuku");
+        public static ShizukuState Shizuku
+        {
+            get
+            {
+#if UNITY_ANDROID && !UNITY_EDITOR
+                try
+                {
+                    return (ShizukuState)Java.CallStatic<int>("shizuku");
+                }
+                catch (AndroidJavaException e)
+                {
+                    s_LastError = e.Message;
+                    return ShizukuState.Error;
+                }
+#else
+                return ShizukuState.Missing;
+#endif
+            }
+        }
+
+        static string s_LastError = "";
+
+        // Why Shizuku last answered Error.
+        public static string ShizukuError
+        {
+            get
+            {
+                var java = Call<string>("shizukuError");
+                return string.IsNullOrEmpty(java) ? s_LastError : java;
+            }
+        }
+
+        public static bool ShizukuInstalled => CallWithActivity<bool>("shizukuInstalled");
+
+        // What to tell the user, in the screen, when apps can't open here.
+        public static string NoticeFor(ShizukuState state, bool installed, string label, string error) => state switch
+        {
+            ShizukuState.NotAllowed => $"CardboardXR isn't allowed to use Shizuku, so {label} can't open here. " +
+                                       "Allow CardboardXR in the Shizuku app, then try again.",
+            ShizukuState.TooOld => $"This Shizuku is too old to open {label} here. Update Shizuku, then try again.",
+            ShizukuState.Error => $"Couldn't reach Shizuku to open {label} here: {error}",
+            _ => installed
+                ? $"Shizuku isn't running, so {label} can't open here. Start it in the Shizuku app " +
+                  "(with Wireless debugging), then try again."
+                : $"{label} opens here with Shizuku, which isn't installed. Install it, start it " +
+                  "(with Wireless debugging), then try again.",
+        };
+
+        // The screen in front of the user, saying why the app can't open on it, with what to do.
+        public static void ShowNotice(AndroidApps.App app, bool landscape, string message)
+        {
+            if (s_Instance == null)
+            {
+                var holder = new GameObject("App Screen");
+                DontDestroyOnLoad(holder);
+                s_Instance = holder.AddComponent<AppScreen>();
+            }
+            s_Instance.Notice(app, landscape, message);
+        }
 
         // Asks Shizuku (its own dialog) to let CardboardXR use it. False if it won't ask again.
         public static bool AskShizuku() => Call<bool>("askShizuku");
@@ -119,9 +184,51 @@ namespace CardboardXR.Demos
 
         static bool Supported => AndroidApps.Supported;
 
+        void Notice(AndroidApps.App app, bool landscape, string message)
+        {
+            if (m_Open && !m_Notice)
+                Run("close");
+            Build(landscape);
+            m_App = app;
+            m_Label = app.Label;
+            m_Title.text = app.Label;
+            m_Open = true;
+            m_Notice = true;
+            m_Showing = false;
+            m_Screen.texture = null;
+            m_Screen.color = Color.black;
+            m_NoticeButtons.gameObject.SetActive(true);
+            SetStatus(message);
+            Place();
+            M3Fade.SetShown(m_Panel.gameObject, true);
+            Debug.Log("[Apps] Showed why the app can't open on a screen in XR");
+        }
+
+        void TryAgain()
+        {
+            Debug.Log("[Apps] Trying again to open the app on a screen in XR");
+            AndroidApps.Open(m_App);
+        }
+
+        void OpenFlat()
+        {
+            var app = m_App;
+            Close();
+            AndroidApps.OpenFlat(app);
+        }
+
+        void OpenShizuku()
+        {
+            var outcome = CallWithActivity<string>("openShizuku");
+            Debug.Log($"[Apps] Shizuku: {outcome}");
+        }
+
         void Open(AndroidApps.App app, bool landscape)
         {
             Build(landscape);
+            m_App = app;
+            m_Notice = false;
+            m_NoticeButtons.gameObject.SetActive(false);
             m_Label = app.Label;
             m_Title.text = app.Label;
             m_Display = DisplayPixels(landscape);
@@ -156,7 +263,9 @@ namespace CardboardXR.Demos
             if (!m_Open)
                 return;
             m_Open = false;
-            Run("close");
+            if (!m_Notice)
+                Run("close");
+            m_Notice = false;
             M3Fade.SetShown(m_Panel.gameObject, false);
             m_Screen.texture = null;
             m_Screen.color = Color.black;
@@ -181,7 +290,7 @@ namespace CardboardXR.Demos
         // keeps going along the edge). Called by AppScreenSurface.
         public void TouchAt(int action, Ray ray)
         {
-            if (!m_Open || m_ScreenRect == null)
+            if (!m_Open || m_Notice || m_ScreenRect == null)
                 return;
             var plane = new Plane(m_ScreenRect.forward, m_ScreenRect.position);
             var point = m_LastTouch;
@@ -203,7 +312,7 @@ namespace CardboardXR.Demos
 
         void Update()
         {
-            if (!m_Open)
+            if (!m_Open || m_Notice)
                 return;
             UploadFrame();
             if (Time.unscaledTime < m_NextPoll)
@@ -385,6 +494,23 @@ namespace CardboardXR.Demos
                 new Vector2(titleRight - titleLeft, k_BarHeight), M3Theme.OnSurface, TextAlignmentOptions.Left);
             m_Title.textWrappingMode = TextWrappingModes.NoWrap;
             m_Title.overflowMode = TextOverflowModes.Ellipsis;
+
+            // The notice's choices, side by side under its text in the middle of the screen; narrower, and
+            // without icons, on an upright one.
+            m_NoticeButtons = M3.Group("Notice", m_Panel, new Vector2(0f, screenY - 64f), new Vector2(screenSize.x, M3Theme.k_Target));
+            var width = landscape ? 136f : 112f;
+            var step = width + k_Padding;
+            var again = M3.Button("Try Again", m_NoticeButtons, "Try again", M3Button.Variant.Filled, new Vector2(-step, 0f), null,
+                landscape ? "refresh" : null, width);
+            var flat = M3.Button("Open Flat", m_NoticeButtons, "Open flat", M3Button.Variant.Tonal, Vector2.zero, null,
+                landscape ? "smartphone" : null, width);
+            var shizuku = M3.Button("Shizuku", m_NoticeButtons, "Shizuku", M3Button.Variant.Tonal, new Vector2(step, 0f), null,
+                landscape ? "settings" : null, width);
+            again.Button.onClick.AddListener(TryAgain);
+            flat.Button.onClick.AddListener(OpenFlat);
+            shizuku.Button.onClick.AddListener(OpenShizuku);
+            m_NoticeButtons.gameObject.SetActive(m_Notice);
+            m_Status.rectTransform.anchoredPosition = new Vector2(0f, screenY + 36f);
         }
 
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -399,6 +525,24 @@ namespace CardboardXR.Demos
             try
             {
                 return Java.CallStatic<T>(method, args);
+            }
+            catch (AndroidJavaException e)
+            {
+                Debug.LogWarning($"[Apps] Screen {method} failed: {e.Message}");
+            }
+#endif
+            return default;
+        }
+
+        // A static method of the Java side that takes the activity first.
+        static T CallWithActivity<T>(string method)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using var player = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
+                using var activity = player.GetStatic<AndroidJavaObject>("currentActivity");
+                return Java.CallStatic<T>(method, activity);
             }
             catch (AndroidJavaException e)
             {

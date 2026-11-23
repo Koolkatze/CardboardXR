@@ -39,6 +39,9 @@ public final class CardboardXRScreen {
     public static final int SHIZUKU_NOT_ALLOWED = 1;
     public static final int SHIZUKU_READY = 2;
     public static final int SHIZUKU_TOO_OLD = 3;
+    // Asking failed: shizukuError() says why.
+    public static final int SHIZUKU_ERROR = 4;
+    private static final String SHIZUKU_PACKAGE = "moe.shizuku.privileged.api";
 
     private static final String TAG = "CardboardXR";
     private static final int PERMISSION_REQUEST = 0x5843;
@@ -89,7 +92,41 @@ public final class CardboardXRScreen {
         } catch (Throwable t) {
             // The library missing from the build, or the binder dying between the calls.
             Log.w(TAG, "Couldn't ask Shizuku", t);
-            return SHIZUKU_MISSING;
+            s_ShizukuError = t.toString();
+            return SHIZUKU_ERROR;
+        }
+    }
+
+    private static volatile String s_ShizukuError = "";
+
+    // Why shizuku() last said SHIZUKU_ERROR.
+    public static String shizukuError() { return s_ShizukuError; }
+
+    // Whether the Shizuku app is installed at all (it can be, and not running).
+    public static boolean shizukuInstalled(Activity activity) {
+        try {
+            activity.getPackageManager().getPackageInfo(SHIZUKU_PACKAGE, 0);
+            return true;
+        } catch (PackageManager.NameNotFoundException e) {
+            return false;
+        }
+    }
+
+    // Opens the Shizuku app, to start it or allow CardboardXR in it; or its download page if it isn't
+    // installed. Returns which.
+    public static String openShizuku(Activity activity) {
+        try {
+            android.content.Intent launch = activity.getPackageManager().getLaunchIntentForPackage(SHIZUKU_PACKAGE);
+            if (launch != null) {
+                activity.startActivity(launch.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
+                return "opened the Shizuku app";
+            }
+            activity.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse("https://shizuku.rikka.app/download/"))
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
+            return "opened Shizuku's download page";
+        } catch (RuntimeException e) {
+            return "failed: " + e;
         }
     }
 

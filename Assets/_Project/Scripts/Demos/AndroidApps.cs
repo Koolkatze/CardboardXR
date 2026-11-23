@@ -18,8 +18,9 @@ namespace CardboardXR.Demos
     //   In XR: with Shizuku running and CardboardXR allowed in it, the app opens on a screen in the
     // stereo scene (AppScreen), on a virtual display of that shape. Allowing it is asked for (Shizuku's
     // own dialog) the first time an app is picked with Shizuku running.
-    //   Flat, without Shizuku: the app opens over CardboardXR, on the phone's own screen, and one that
-    // can turn is kept in landscape while it's in front.
+    //   Without Shizuku, the screen says why the app can't open on it, and what to do (AppScreen
+    // ShowNotice); its Open flat opens the app over CardboardXR, on the phone's own screen, where one
+    // that can turn is kept in landscape while it's in front.
     //   The Java side (Assets/Plugins/Android/CardboardXRApps.java) lists the apps on a thread of its
     //   own, draws their icons and holds landscape with an overlay window, which needs the "Display over
     //   other apps" permission. The first time an app would be kept in landscape without it, Settings
@@ -290,26 +291,24 @@ namespace CardboardXR.Demos
                 Debug.Log($"{k_LogTag} Ignored a pick: still asking for permission to open the app picked before");
                 return;
             }
-            switch (AppScreen.Shizuku)
+            var landscape = OpensInLandscape(app.Fit, LandscapeEnabled);
+            var state = AppScreen.Shizuku;
+            switch (state)
             {
                 case AppScreen.ShizukuState.Ready:
-                    AppScreen.Show(app, OpensInLandscape(app.Fit, LandscapeEnabled));
+                    AppScreen.Show(app, landscape);
                     return;
                 case AppScreen.ShizukuState.NotAllowed when AppScreen.AskShizuku():
                     Debug.Log($"{k_LogTag} Asking Shizuku to let CardboardXR open apps on a screen in XR");
                     s_ShizukuPending = app;
                     return;
-                case AppScreen.ShizukuState.NotAllowed:
-                    Debug.Log($"{k_LogTag} Shizuku won't ask again: allow CardboardXR in the Shizuku app. Opening the app flat");
-                    break;
-                case AppScreen.ShizukuState.TooOld:
-                    Debug.Log($"{k_LogTag} Shizuku is too old for its user service (before v11): opening the app flat");
-                    break;
-                default:
-                    Debug.Log($"{k_LogTag} Shizuku isn't running: opening the app flat, on the phone's own screen");
-                    break;
             }
-            OpenFlat(app);
+            // Said in XR, on the screen, rather than opening the app flat behind the user's back.
+            var installed = AppScreen.ShizukuInstalled;
+            var error = state == AppScreen.ShizukuState.Error ? AppScreen.ShizukuError : "";
+            Debug.Log($"{k_LogTag} Can't open the app on a screen in XR: Shizuku {state}" +
+                      $"{(installed ? ", installed" : ", not installed")}{(error.Length > 0 ? $" ({error})" : "")}");
+            AppScreen.ShowNotice(app, landscape, AppScreen.NoticeFor(state, installed, app.Label, error));
         }
 
         // On a screen in XR, whether the app's display is landscape: landscape apps always, apps that can
@@ -333,12 +332,14 @@ namespace CardboardXR.Demos
                 AppScreen.Show(app, OpensInLandscape(app.Fit, LandscapeEnabled));
                 return;
             }
-            Debug.Log($"{k_LogTag} Shizuku not allowed: opening the app flat");
-            OpenFlat(app);
+            Debug.Log($"{k_LogTag} Shizuku not allowed");
+            AppScreen.ShowNotice(app, OpensInLandscape(app.Fit, LandscapeEnabled),
+                AppScreen.NoticeFor(AppScreen.ShizukuState.NotAllowed, true, app.Label, ""));
         }
 
-        // Over CardboardXR, on the phone's own screen, kept in landscape if it can turn.
-        static void OpenFlat(App app)
+        // Over CardboardXR, on the phone's own screen, kept in landscape if it can turn: the notice's
+        // Open flat.
+        public static void OpenFlat(App app)
         {
             var hold = HoldsLandscape(app.Fit, LandscapeEnabled);
             if (hold && !CanHoldLandscape() && PlayerPrefs.GetInt(k_AskedKey, 0) == 0)
