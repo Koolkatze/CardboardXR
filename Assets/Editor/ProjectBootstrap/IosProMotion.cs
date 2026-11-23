@@ -1,3 +1,7 @@
+// Only with iOS as the build target, as iOS builds are always started (-buildTarget iOS): it needs
+// UnityEditor.iOS.Xcode, from the iOS Build Support module, which an Android-only Unity install (such
+// as the Android image the Android APK workflow builds in) doesn't have.
+#if UNITY_IOS
 using System.IO;
 using UnityEditor;
 using UnityEditor.Build;
@@ -42,3 +46,4 @@ namespace ProjectBootstrap
         }
     }
 }
+#endif
