@@ -43,6 +43,7 @@ namespace ProjectBootstrap
         const string ReticleShaderPath = "Assets/_Project/Shaders/Reticle.shader";
         const string BoundaryShaderPath = "Assets/_Project/Shaders/Boundary.shader";
         const string PassthroughShaderPath = "Assets/_Project/Shaders/Passthrough.shader";
+        const string CameraYuvShaderPath = "Assets/_Project/Shaders/CameraYuv.shader";
         const string ShadowCatcherShaderPath = "Assets/_Project/Shaders/ShadowCatcher.shader";
         const string LitShaderName = "Universal Render Pipeline/Simple Lit";
         // Shadows only matter near the user, on the surfaces in reach; a short distance keeps the
@@ -184,6 +185,7 @@ namespace ProjectBootstrap
             var reticleShader = AssetDatabase.LoadAssetAtPath<Shader>(ReticleShaderPath);
             var boundaryShader = AssetDatabase.LoadAssetAtPath<Shader>(BoundaryShaderPath);
             var passthroughShader = AssetDatabase.LoadAssetAtPath<Shader>(PassthroughShaderPath);
+            var cameraYuvShader = AssetDatabase.LoadAssetAtPath<Shader>(CameraYuvShaderPath);
             var unlit = Shader.Find(UnlitShaderName);
             var catalog = AssetDatabase.LoadAssetAtPath<DemoCatalog>(DemoScenes.CatalogPath);
             if (catalog == null)
@@ -192,7 +194,8 @@ namespace ProjectBootstrap
                 EditorApplication.Exit(1);
                 return null;
             }
-            if (distortionShader == null || reticleShader == null || boundaryShader == null || passthroughShader == null || unlit == null)
+            if (distortionShader == null || reticleShader == null || boundaryShader == null || passthroughShader == null ||
+                cameraYuvShader == null || unlit == null)
             {
                 Debug.LogError($"[StereoBuilder] Missing shader: {DistortionShaderPath}, {ReticleShaderPath}, " +
                                $"{BoundaryShaderPath}, {PassthroughShaderPath} or {UnlitShaderName}.");
@@ -214,6 +217,12 @@ namespace ProjectBootstrap
             var (poseSource, origin, arCamera, arViewOnly) = BuildViewerSetup(rig);
             var fusion = head.AddComponent<HeadPoseFusion>();
             var passthrough = origin.AddComponent<PassthroughController>();
+            // The phone's own camera, for passthrough and pinches in 3DoF.
+            var phoneCamera = origin.AddComponent<PhoneCamera>();
+            var serializedCamera = new SerializedObject(phoneCamera);
+            serializedCamera.FindProperty("m_Fusion").objectReferenceValue = fusion;
+            serializedCamera.FindProperty("m_Shader").objectReferenceValue = cameraYuvShader;
+            serializedCamera.ApplyModifiedPropertiesWithoutUndo();
             var demosObject = new GameObject("Demos");
             var demos = demosObject.AddComponent<DemoManager>();
             var (toolbar, panel) = BuildToolbar(fusion, passthrough, demos);
@@ -240,7 +249,7 @@ namespace ProjectBootstrap
             var settings = BuildSettings(origin, fusion, panel);
             BuildLibrary(panel, demos, settings, toolbar[0], catalog);
             BuildArDebugView(origin, rig, fusion, boundary, arCamera, arViewOnly);
-            BuildPassthrough(passthrough, fusion, rig, arCamera, passthroughToggle, toolbar[5], passthroughShader);
+            BuildPassthrough(passthrough, fusion, rig, arCamera, passthroughToggle, toolbar[5], toolbar[6], passthroughShader);
             BuildLighting(origin, fusion, passthrough, arCamera);
             BuildDemos(demosObject, demos, catalog, fusion, rig, passthrough, boundary, origin, settings);
 
@@ -626,7 +635,7 @@ namespace ProjectBootstrap
         // front of the AR camera that both eyes see. Its shader draws it first, ignoring depth and
         // writing none, so virtual things always draw over it, however near or far they are.
         static void BuildPassthrough(PassthroughController passthrough, HeadPoseFusion fusion, StereoRig rig,
-            Camera arCamera, M3Button toggle, M3Button zoom, Shader passthroughShader)
+            Camera arCamera, M3Button toggle, M3Button zoom, M3Button lens, Shader passthroughShader)
         {
             var material = SaveAsset(new Material(passthroughShader) { name = "Passthrough" }, $"{GeneratedFolder}/Passthrough.mat");
             var screen = CreatePrimitive(PrimitiveType.Quad, "Passthrough Screen", arCamera.transform, material);
@@ -643,6 +652,7 @@ namespace ProjectBootstrap
             serialized.FindProperty("m_Screen").objectReferenceValue = screenRenderer;
             serialized.FindProperty("m_Toggle").objectReferenceValue = toggle;
             serialized.FindProperty("m_ZoomButton").objectReferenceValue = zoom;
+            serialized.FindProperty("m_LensButton").objectReferenceValue = lens;
             serialized.ApplyModifiedPropertiesWithoutUndo();
         }
 
@@ -796,18 +806,24 @@ namespace ProjectBootstrap
 
             // The view switch isn't here: it's on the screen itself, in the settings menu, since it's
             // pressed with the phone in hand where this panel can't be reached.
-            var items = new M3Button[6];
+            var items = new M3Button[7];
             // Apps shows the app library above the panel (BuildLibrary), the way to the lobby and
             // between demos.
             var library = demos.gameObject.AddComponent<AppLibrary>();
             items[0] = ToolbarItem(panel, "Apps", "apps", "Apps", library.Toggle);
             items[1] = ToolbarItem(panel, "Recenter", "my_location", "Recenter", fusion.Recenter);
             items[2] = ToolbarItem(panel, "Tracking Mode", "view_in_ar", "6DoF", fusion.ToggleMode);
+            // The app runs in 3DoF: demos that need 6DoF turn it on themselves, so the switch is hidden.
+            items[2].gameObject.SetActive(false);
             items[3] = ToolbarItem(panel, "Passthrough", "visibility", "Passthrough", passthrough.Toggle);
             // The passthrough's digital zoom, its label the step (PassthroughController); shown only
             // while passthrough is on.
             items[5] = ToolbarItem(panel, "Passthrough Zoom", "zoom_in", "1x", passthrough.NextZoom);
             items[5].gameObject.SetActive(false);
+            // Which real lens the phone's camera uses in 3DoF, its label the lens (0.5x, 1x, 5x); shown
+            // only while passthrough is on in 3DoF on a phone with more than one.
+            items[6] = ToolbarItem(panel, "Camera Lens", "photo_camera", "1x", passthrough.NextLens);
+            items[6].gameObject.SetActive(false);
             return (items, panel);
         }
 
@@ -881,9 +897,9 @@ namespace ProjectBootstrap
         // Orders the items into their groups, with a divider before each group after the first.
         static void ArrangeToolbar(RectTransform panel, M3Button[] items)
         {
-            // Apps | Recenter, Scan Room | 6DoF, Passthrough, its Zoom.
-            var order = new[] { items[0], items[1], items[4], items[2], items[3], items[5] };
-            var groups = new[] { 0, 1, 1, 2, 2, 2 };
+            // Apps | Recenter, Scan Room | 6DoF, Passthrough, its Camera lens and Zoom.
+            var order = new[] { items[0], items[1], items[4], items[2], items[3], items[6], items[5] };
+            var groups = new[] { 0, 1, 1, 2, 2, 2, 2 };
             var dividers = new Image[3];
             for (var g = 1; g < dividers.Length; g++)
             {

@@ -15,16 +15,23 @@ namespace CardboardXR.Hands
     // in 3D (which needs the AR session running, depth, and the landmarker on every image), this only
     // asks whether the thumb and index fingertips are touching, which the camera image alone answers:
     // their gap over the palm's width there, about 0.23 pinched and 1.8-2.1 open in the pinch study.
-    // So it opens the rear camera directly at a low resolution and rate (no ARKit or ARCore), runs the
-    // same MediaPipe models on those images (the palm detector only while no hand is followed), and a
-    // pinch clicks whatever the gaze is on, as a screen tap does. A click wants ~100 ms, not the
-    // dragging that made a slower landmarker feel laggy. A hand has to be seen in k_SteadyResults
-    // results in a row before its pinch counts, so one passing through view doesn't click. It can't
-    // run alongside the AR session, which holds the camera, so it stays off in 6DoF. Enable it to
-    // start. Logs [Pinch] every five seconds, with what it costs.
+    // So it reads the phone camera's images (PhoneCamera, shared with the passthrough view, from
+    // whichever lens is chosen; no ARKit or ARCore) at up to m_ReadsPerSecond, drawn small, runs the
+    // same MediaPipe models on them, and a pinch clicks whatever the gaze is on, as a screen tap does.
+    // It follows up to two hands: the palm detector runs while fewer are followed (every
+    // m_SearchInterval with none, m_SecondHandInterval with one), and the landmarker on each followed
+    // hand. The first hand to pinch clicks (PinchRouter); a second pinching while it's held makes a
+    // two-handed pinch (BothPinched), which the app's screen uses to move and resize itself. Each
+    // pinch also has a direction in the world (TryGetPinchDirection): where its fingertips were seen,
+    // through the image's field of view and the head's rotation when the image was taken. A click
+    // wants ~100 ms, not the dragging that made a slower landmarker feel laggy. A hand has to be seen
+    // in k_SteadyResults results in a row before its pinch counts, so one passing through view doesn't
+    // click. It can't run alongside the AR session, which holds the camera, so it stays off in 6DoF.
+    // Enable it to start. Logs [Pinch] every five seconds, with what it costs.
     public class PinchSensor : MonoBehaviour
     {
         const int k_LandmarkerSize = 224;
+        const int k_MaxHands = 2;
         static readonly (string name, int index) k_BoxesOutput = ("Identity", 0);
         static readonly (string name, int index) k_ScoresOutput = ("Identity_1", 1);
         static readonly (string name, int index) k_LandmarksOutput = ("Identity", 0);
@@ -37,23 +44,43 @@ namespace CardboardXR.Hands
         // A hand must have been seen in more than this many results in a row before a pinch counts.
         public const int k_SteadyResults = 2;
         const float k_StatusSeconds = 5f;
-        // No frame for this long, in seconds, and the camera is opened again: on Android it can come
-        // up silent when the AR session has only just let go of it.
-        const float k_NoFrameSeconds = 3f;
 
         [SerializeField] HeadPoseFusion m_Fusion;
         [SerializeField] GazePointer m_Gaze;
         [SerializeField] ModelAsset m_Detector;
         [SerializeField] ModelAsset m_Landmarker;
-        [Tooltip("The camera's requested size and rate. Lower costs less; the models see at most 640 wide anyway.")]
-        [SerializeField] Vector2Int m_CameraSize = new(640, 480);
-        [SerializeField] int m_CameraFps = 15;
+        [Tooltip("How wide the camera image is drawn for the models, which see at most 640 wide anyway.")]
+        [SerializeField] int m_ModelWidth = 640;
+        [Tooltip("At most this many camera images a second are read for the models.")]
+        [SerializeField] int m_ReadsPerSecond = 20;
         [Tooltip("While no hand is followed, the palm detector runs at most this often, in seconds.")]
         [SerializeField] float m_SearchInterval = 0.2f;
+        [Tooltip("While one hand is followed, the palm detector looks for a second at most this often, in seconds.")]
+        [SerializeField] float m_SecondHandInterval = 0.5f;
         [SerializeField, Range(0f, 1f)] float m_MinPalmScore = 0.5f;
         [SerializeField, Range(0f, 1f)] float m_MinHandPresence = 0.5f;
 
-        WebCamTexture m_Camera;
+        // One followed hand.
+        class Hand
+        {
+            public HandRegion? Region;
+            public readonly PinchRule Rule = new();
+            public readonly HandTurnGate Turn = new();
+            public readonly Vector2[] Landmarks = new Vector2[HandGeometry.JointCount];
+            public float RightHandScore = 0.5f;
+            // Its pinch went to PinchRouter as a click.
+            public bool Clicks;
+            // Where its fingertips met, over the image's size (0 to 1, x right, y down), in the image
+            // taken at TimestampNs.
+            public Vector2 PinchPoint;
+            public long TimestampNs;
+            public bool Seen => Region != null;
+        }
+
+        public static PinchSensor Instance { get; private set; }
+
+        readonly Hand[] m_Hands = { new(), new() };
+        readonly System.Collections.Generic.List<Palm> m_Palms = new();
         Worker m_DetectorWorker;
         Worker m_LandmarkerWorker;
         int m_BoxesIndex, m_ScoresIndex, m_LandmarksIndex, m_PresenceIndex, m_HandednessIndex;
@@ -64,9 +91,7 @@ namespace CardboardXR.Hands
         float[] m_Boxes;
         float[] m_Scores;
         readonly float[] m_LandmarkValues = new float[HandGeometry.JointCount * 3];
-        readonly Vector2[] m_ImageLandmarks = new Vector2[HandGeometry.JointCount];
         Vector2[] m_Anchors;
-        Color32[] m_Pixels;
         // The frame the models are working on, and the newest one read since, which they swap in when
         // they're done (see Update and Step): reading the camera never waits for the models, nor
         // they for it. On a Pixel 9 Pro, taking turns left 2-5 frames a second analyzed.
@@ -74,40 +99,79 @@ namespace CardboardXR.Hands
         NativeArray<byte> m_NextImage;
         int m_Width, m_Height;
         int m_NextWidth, m_NextHeight;
+        long m_ImageTimestampNs, m_NextTimestampNs, m_PendingTimestampNs;
         bool m_HasNextImage;
         bool m_ReadbackInFlight;
         bool m_Running;
         bool m_LoopActive;
         bool m_LoggedCamera;
-        // Frames are read back from the GPU without stalling the main thread where the camera's pixel
-        // format allows it (the Pixel's does); otherwise GetPixels32, which does stall (~4 ms on the
-        // Pixel, 0.3-0.9 ms on the iPhone). The iPhone's camera texture is B8G8R8A8_SRGB, which can't
-        // be read back: Unity logs an error per frame but doesn't flag the request, and hands blank
-        // frames to the models, so pinches silently stopped working. Hence asking first.
+        bool m_HasCamera;
+        // Frames are read back from the GPU without stalling the main thread where the target's
+        // format allows it; otherwise with ReadPixels, which does stall.
         bool m_AsyncReadback = true;
-        bool m_CheckedFormat;
-        float m_LastFrameTime;
-
-        readonly PinchRule m_Rule = new();
-        readonly HandTurnGate m_Turn = new();
-        HandRegion? m_Region;
+        RenderTexture m_Small;
+        Texture2D m_ReadTexture;
+        int m_LastVersion;
+        float m_NextRead;
+        bool m_BothPinched;
         float m_NextSearch;
 
         // Statistics for the status line.
-        int m_Reads, m_Frames, m_Detections, m_Landmarks, m_Losses, m_Pinches;
+        int m_Reads, m_Frames, m_Detections, m_Landmarks, m_Losses, m_Pinches, m_TwoHanded;
         double m_ReadMs, m_DetectMs, m_LandmarkMs;
         float m_MinRatio = float.PositiveInfinity, m_MaxRatio;
         float m_StatusStart;
 
-        public bool IsPinched => m_Rule.IsPinched;
-        public bool SeesHand => m_Region != null;
+        // A pinch that clicks is held.
+        public bool IsPinched
+        {
+            get
+            {
+                foreach (var hand in m_Hands)
+                {
+                    if (hand.Clicks)
+                        return true;
+                }
+                return false;
+            }
+        }
 
-        // The latest result's landmarks in the camera image, in pixels (x right, y down, upright on the
-        // screen), the image's size, and the chance it's a right hand: for which way the palm faces
+        public bool SeesHand => m_Hands[0].Seen || m_Hands[1].Seen;
+
+        // Both hands are pinching: the first one's pinch clicked, and the second came while it was held.
+        public bool BothPinched => m_BothPinched;
+        public event Action<bool> BothPinchedChanged;
+
+        // The first hand seen's landmarks in the camera image, in pixels (x right, y down, upright on
+        // the screen), the image's size, and the chance it's a right hand: for which way the palm faces
         // (PalmGesture) and where the hand is.
-        public System.Collections.Generic.IReadOnlyList<Vector2> ImageLandmarks => m_ImageLandmarks;
+        public System.Collections.Generic.IReadOnlyList<Vector2> ImageLandmarks => FirstSeen().Landmarks;
         public Vector2 ImageSize => new(m_Width, m_Height);
-        public float RightHandScore { get; private set; } = 0.5f;
+        public float RightHandScore => FirstSeen().RightHandScore;
+
+        Hand FirstSeen() => m_Hands[0].Seen || !m_Hands[1].Seen ? m_Hands[0] : m_Hands[1];
+
+        // Which way the pinch is in the world, from where the fingertips met in the latest image:
+        // which 0 for the pinch that clicked, 1 for the other. False if there's no such pinch.
+        public bool TryGetPinchDirection(int which, out Vector3 direction)
+        {
+            direction = Vector3.forward;
+            Hand clicking = null, other = null;
+            foreach (var hand in m_Hands)
+            {
+                if (!hand.Rule.IsPinched)
+                    continue;
+                if (hand.Clicks)
+                    clicking = hand;
+                else
+                    other = hand;
+            }
+            var chosen = which == 0 ? clicking : other;
+            var camera = PhoneCamera.Instance;
+            return chosen != null && camera != null && camera.TryGetWorldDirection(chosen.PinchPoint, chosen.TimestampNs, out direction);
+        }
+
+        void Awake() => Instance = this;
 
         void OnEnable()
         {
@@ -127,14 +191,16 @@ namespace CardboardXR.Hands
         {
             m_Running = false;
             // Now, not when the loop next wakes: the AR session may be about to open the camera.
-            if (m_Camera != null)
-                m_Camera.Stop();
-            if (m_Rule.IsPinched)
-            {
-                m_Rule.Reset();
-                PinchRouter.End();
-            }
-            m_Region = null;
+            ReleaseCamera();
+            foreach (var hand in m_Hands)
+                Forget(hand);
+            SetBothPinched(false);
+        }
+
+        void OnDestroy()
+        {
+            if (Instance == this)
+                Instance = null;
         }
 
         async void RunLoop()
@@ -145,8 +211,8 @@ namespace CardboardXR.Hands
                 if (!StartCamera())
                     return;
                 Setup();
-                Debug.Log($"[Pinch] On: rear camera asked for {m_CameraSize.x}x{m_CameraSize.y} at {m_CameraFps} fps; " +
-                          $"a pinch closes below {k_CloseRatio:F2} palm widths and opens above {k_OpenRatio:F2}");
+                Debug.Log($"[Pinch] On: up to {k_MaxHands} hands in the phone camera's images, read at up to {m_ReadsPerSecond}/s " +
+                          $"{m_ModelWidth} wide; a pinch closes below {k_CloseRatio:F2} palm widths and opens above {k_OpenRatio:F2}");
                 while (m_Running)
                 {
                     // Also leaves if something turned 6DoF on, which wants the camera.
@@ -175,26 +241,26 @@ namespace CardboardXR.Hands
 
         bool StartCamera()
         {
-            string name = null;
-            foreach (var device in WebCamTexture.devices)
+            var camera = PhoneCamera.Instance;
+            if (camera == null)
             {
-                if (!device.isFrontFacing)
-                {
-                    name = device.name;
-                    break;
-                }
-            }
-            if (name == null)
-            {
-                Debug.LogWarning("[Pinch] No rear camera");
+                Debug.LogWarning("[Pinch] No phone camera");
                 enabled = false;
                 return false;
             }
-            m_Camera = new WebCamTexture(name, m_CameraSize.x, m_CameraSize.y, m_CameraFps);
-            m_Camera.Play();
-            m_LastFrameTime = Time.unscaledTime;
-            m_CheckedFormat = false;
+            camera.Acquire(this);
+            m_HasCamera = true;
+            m_LastVersion = 0;
             return true;
+        }
+
+        void ReleaseCamera()
+        {
+            if (!m_HasCamera)
+                return;
+            m_HasCamera = false;
+            if (PhoneCamera.Instance != null)
+                PhoneCamera.Instance.Release(this);
         }
 
         void Setup()
@@ -219,12 +285,7 @@ namespace CardboardXR.Hands
 
         void Teardown()
         {
-            if (m_Camera != null)
-            {
-                m_Camera.Stop();
-                Destroy(m_Camera);
-                m_Camera = null;
-            }
+            ReleaseCamera();
             m_DetectorWorker?.Dispose();
             m_LandmarkerWorker?.Dispose();
             m_DetectorInput?.Dispose();
@@ -235,6 +296,17 @@ namespace CardboardXR.Hands
                 m_Image.Dispose();
             if (m_NextImage.IsCreated)
                 m_NextImage.Dispose();
+            if (m_Small != null)
+            {
+                m_Small.Release();
+                Destroy(m_Small);
+                m_Small = null;
+            }
+            if (m_ReadTexture != null)
+            {
+                Destroy(m_ReadTexture);
+                m_ReadTexture = null;
+            }
             m_HasNextImage = false;
             m_ReadbackInFlight = false;
         }
@@ -249,24 +321,27 @@ namespace CardboardXR.Hands
             return output.index;
         }
 
-        // Runs the newest camera frame through the models. False if there was no new frame, or it
-        // isn't time to look for a hand yet.
+        int FollowedCount() => (m_Hands[0].Seen ? 1 : 0) + (m_Hands[1].Seen ? 1 : 0);
+
+        // Runs the newest camera frame through the models. False if there was no new frame.
         async Awaitable<bool> Step()
         {
             if (!m_HasNextImage)
                 return false;
-            if (m_Region == null && Time.unscaledTime < m_NextSearch)
+            var followed = FollowedCount();
+            if (followed == 0 && Time.unscaledTime < m_NextSearch)
                 return false;
 
             // The newest frame becomes the one worked on; the old buffer takes the next read.
             (m_Image, m_NextImage) = (m_NextImage, m_Image);
             m_Width = m_NextWidth;
             m_Height = m_NextHeight;
+            m_ImageTimestampNs = m_NextTimestampNs;
             m_HasNextImage = false;
             m_Frames++;
             var stopwatch = Stopwatch.StartNew();
 
-            if (m_Region == null)
+            if (followed < k_MaxHands && Time.unscaledTime >= m_NextSearch)
             {
                 stopwatch.Restart();
                 var letterbox = Letterbox.Fit(m_Width, m_Height, PalmDecoder.InputSize);
@@ -281,16 +356,62 @@ namespace CardboardXR.Hands
                 m_Detections++;
                 if (!m_Running)
                     return true;
-                if (!PalmDecoder.TryDecodeBest(m_Boxes, m_Scores, m_Anchors, m_MinPalmScore, out var palm))
+                PalmDecoder.DecodeTop(m_Boxes, m_Scores, m_Anchors, m_MinPalmScore, k_MaxHands, m_Palms);
+                foreach (var palm in m_Palms)
                 {
-                    m_NextSearch = Time.unscaledTime + m_SearchInterval;
-                    return true;
+                    var region = HandRegion.FromPalm(palm, letterbox);
+                    var free = FreeSlotFor(region);
+                    if (free != null)
+                        free.Region = region;
                 }
-                m_Region = HandRegion.FromPalm(palm, letterbox);
+                followed = FollowedCount();
+                m_NextSearch = Time.unscaledTime + (followed == 0 ? m_SearchInterval : m_SecondHandInterval);
+                if (followed == 0)
+                    return true;
             }
 
+            foreach (var hand in m_Hands)
+            {
+                if (!hand.Seen)
+                    continue;
+                await Landmark(hand, stopwatch);
+                if (!m_Running)
+                    return true;
+            }
+            // Two followed regions that closed in on the same hand: keep one.
+            if (m_Hands[0].Seen && m_Hands[1].Seen && SameHand(m_Hands[0].Region.Value, m_Hands[1].Region.Value))
+                Lose(m_Hands[1]);
+            UpdateBothPinched();
+            return true;
+        }
+
+        // A slot for a newly found palm, unless it's a hand already followed.
+        Hand FreeSlotFor(HandRegion region)
+        {
+            Hand free = null;
+            foreach (var hand in m_Hands)
+            {
+                if (hand.Seen)
+                {
+                    if (SameHand(hand.Region.Value, region))
+                        return null;
+                }
+                else
+                {
+                    free ??= hand;
+                }
+            }
+            return free;
+        }
+
+        // Regions whose middles are closer than half their size are one hand.
+        public static bool SameHand(HandRegion a, HandRegion b) =>
+            Vector2.Distance(a.center, b.center) < 0.25f * (a.size + b.size);
+
+        async Awaitable Landmark(Hand hand, Stopwatch stopwatch)
+        {
             stopwatch.Restart();
-            var region = m_Region.Value;
+            var region = hand.Region.Value;
             ImageSampler.SampleRegion(m_Image, m_Width, m_Height, region, k_LandmarkerSize, m_LandmarkerPixels);
             m_LandmarkerInput.Upload(m_LandmarkerPixels);
             m_LandmarkerWorker.Schedule(m_LandmarkerInput);
@@ -302,124 +423,186 @@ namespace CardboardXR.Hands
             using (var output = (m_LandmarkerWorker.PeekOutput(m_HandednessIndex) as Tensor<float>).ReadbackAndClone())
                 handedness = output[0];
             // The model may give a probability or a logit.
-            RightHandScore = handedness < 0f || handedness > 1f ? PalmDecoder.Sigmoid(handedness) : handedness;
+            hand.RightHandScore = handedness < 0f || handedness > 1f ? PalmDecoder.Sigmoid(handedness) : handedness;
             m_LandmarkMs += stopwatch.Elapsed.TotalMilliseconds;
             m_Landmarks++;
             if (!m_Running)
-                return true;
+                return;
 
             if (presence < 0f || presence > 1f)
                 presence = PalmDecoder.Sigmoid(presence);
             if (presence < m_MinHandPresence)
             {
-                Lose();
-                return true;
+                Lose(hand);
+                return;
             }
 
+            var points = hand.Landmarks;
             for (var i = 0; i < HandGeometry.JointCount; i++)
             {
                 var crop = new Vector2(m_LandmarkValues[i * 3], m_LandmarkValues[i * 3 + 1]) / k_LandmarkerSize;
-                m_ImageLandmarks[i] = region.CropToImage(crop);
+                points[i] = region.CropToImage(crop);
             }
-            m_Region = HandRegion.FromLandmarks(m_ImageLandmarks);
-            var ratio = Vector2.Distance(m_ImageLandmarks[HandGeometry.ThumbTip], m_ImageLandmarks[HandGeometry.IndexTip]) /
-                        Mathf.Max(1f, HandGeometry.PalmSpan(m_ImageLandmarks));
+            hand.Region = HandRegion.FromLandmarks(points);
+            var thumb = points[HandGeometry.ThumbTip];
+            var index = points[HandGeometry.IndexTip];
+            hand.PinchPoint = new Vector2((thumb.x + index.x) / 2f / Mathf.Max(1, m_Width), (thumb.y + index.y) / 2f / Mathf.Max(1, m_Height));
+            hand.TimestampNs = m_ImageTimestampNs;
+            var ratio = Vector2.Distance(thumb, index) / Mathf.Max(1f, HandGeometry.PalmSpan(points));
             m_MinRatio = Mathf.Min(m_MinRatio, ratio);
             m_MaxRatio = Mathf.Max(m_MaxRatio, ratio);
             // No pinch starts while the hand turns over (HandTurnGate): edge-on, the fingertips meet in
             // the image too.
-            var turning = m_Turn.Update(PalmGesture.Facing(m_ImageLandmarks[PalmGesture.k_Wrist],
-                m_ImageLandmarks[PalmGesture.k_IndexKnuckle], m_ImageLandmarks[PalmGesture.k_PinkyKnuckle], RightHandScore >= 0.5f),
+            var turning = hand.Turn.Update(PalmGesture.Facing(points[PalmGesture.k_Wrist],
+                points[PalmGesture.k_IndexKnuckle], points[PalmGesture.k_PinkyKnuckle], hand.RightHandScore >= 0.5f),
                 Time.unscaledTime);
-            if (turning && !m_Rule.IsPinched && ratio < k_CloseRatio)
+            if (turning && !hand.Rule.IsPinched && ratio < k_CloseRatio)
             {
                 Debug.Log($"[Pinch] Fingertips {ratio:F2} palm widths apart while the hand turned over; not a pinch");
                 ratio = k_CloseRatio;
             }
-            var change = m_Rule.Update(true, ratio);
+            var change = hand.Rule.Update(true, ratio);
             if (change == PinchRule.Change.Closed)
             {
                 m_Pinches++;
-                // At the moment of the pinch, as the viewer's button clicks: PinchRouter decides what
-                // it does, from opening settings to clicking what the gaze is on.
-                Debug.Log($"[Pinch] Pinched ({ratio:F2} palm widths)");
-                PinchRouter.Begin(PinchSource.Camera, m_Gaze, false);
+                if (!IsPinched)
+                {
+                    // At the moment of the pinch, as the viewer's button clicks: PinchRouter decides what
+                    // it does, from opening settings to clicking what the gaze is on.
+                    hand.Clicks = true;
+                    Debug.Log($"[Pinch] Pinched ({ratio:F2} palm widths)");
+                    PinchRouter.Begin(PinchSource.Camera, m_Gaze, false);
+                }
+                else
+                {
+                    Debug.Log($"[Pinch] Second hand pinched ({ratio:F2} palm widths)");
+                }
             }
             else if (change == PinchRule.Change.Opened)
             {
+                EndClick(hand);
+            }
+        }
+
+        void EndClick(Hand hand)
+        {
+            if (!hand.Clicks)
+                return;
+            hand.Clicks = false;
+            PinchRouter.End();
+        }
+
+        void UpdateBothPinched()
+        {
+            var clicking = false;
+            var other = false;
+            foreach (var hand in m_Hands)
+            {
+                if (!hand.Rule.IsPinched)
+                    continue;
+                if (hand.Clicks)
+                    clicking = true;
+                else
+                    other = true;
+            }
+            SetBothPinched(clicking && other);
+        }
+
+        void SetBothPinched(bool both)
+        {
+            if (both == m_BothPinched)
+                return;
+            m_BothPinched = both;
+            if (both)
+                m_TwoHanded++;
+            Debug.Log(both ? "[Pinch] Both hands pinching" : "[Pinch] Two-handed pinch ended");
+            BothPinchedChanged?.Invoke(both);
+        }
+
+        void Lose(Hand hand)
+        {
+            if (hand.Region != null)
+                m_Losses++;
+            hand.Region = null;
+            hand.Turn.Reset();
+            if (hand.Rule.Update(false, 0f) == PinchRule.Change.Opened)
+                EndClick(hand);
+            UpdateBothPinched();
+            if (FollowedCount() == 0)
+                m_NextSearch = Time.unscaledTime + m_SearchInterval;
+        }
+
+        // Without a word, as the sensor stops.
+        void Forget(Hand hand)
+        {
+            hand.Region = null;
+            hand.Turn.Reset();
+            if (hand.Clicks)
+            {
+                hand.Clicks = false;
                 PinchRouter.End();
             }
-            return true;
+            hand.Rule.Reset();
         }
 
-        void Lose()
-        {
-            if (m_Region != null)
-                m_Losses++;
-            m_Region = null;
-            m_Turn.Reset();
-            if (m_Rule.Update(false, 0f) == PinchRule.Change.Opened)
-                PinchRouter.End();
-            m_NextSearch = Time.unscaledTime + m_SearchInterval;
-        }
-
-        // Reads each new camera frame into m_NextImage as RGBA with the top row first, as the
-        // samplers expect, turned upright on the screen, while the models work on m_Image. At most
-        // one read back from the GPU at a time; a newer frame replaces one not yet taken.
+        // Draws each new camera image small and reads it back into m_NextImage as RGBA with the top
+        // row first, as the samplers expect, while the models work on m_Image. At most one read back
+        // from the GPU at a time; a newer frame replaces one not yet taken.
         void Update()
         {
-            if (!m_Running || m_Camera == null)
+            var camera = PhoneCamera.Instance;
+            if (!m_Running || !m_HasCamera || camera == null || !camera.HasImage || camera.Image == null)
                 return;
-            // Stopped by OnDisable and enabled again before the loop noticed, or silent.
-            if (!m_Camera.isPlaying || Time.unscaledTime - m_LastFrameTime > k_NoFrameSeconds)
-            {
-                if (m_Camera.isPlaying)
-                {
-                    Debug.Log($"[Pinch] No camera frames for {k_NoFrameSeconds:F0} s: opening the camera again");
-                    m_Camera.Stop();
-                }
-                m_Camera.Play();
-                m_LastFrameTime = Time.unscaledTime;
+            if (camera.ImageVersion == m_LastVersion || m_ReadbackInFlight || Time.unscaledTime < m_NextRead)
                 return;
-            }
-            if (!m_Camera.didUpdateThisFrame || m_Camera.width < 32)
-                return;
-            m_LastFrameTime = Time.unscaledTime;
-
-            if (!m_CheckedFormat)
-            {
-                m_CheckedFormat = true;
-                var format = m_Camera.graphicsFormat;
-                m_AsyncReadback = SystemInfo.IsFormatSupported(format, GraphicsFormatUsage.ReadPixels);
-                Debug.Log($"[Pinch] Camera texture {format}: " +
-                          (m_AsyncReadback ? "read back without waiting" : "can't be read back, so read with GetPixels32"));
-            }
+            m_LastVersion = camera.ImageVersion;
+            m_NextRead = Time.unscaledTime + 1f / Mathf.Max(1, m_ReadsPerSecond);
 
             var stopwatch = Stopwatch.StartNew();
+            EnsureSmall(camera.Image.width, camera.Image.height);
+            if (!camera.DrawTo(m_Small, forModels: true))
+                return;
+            m_PendingTimestampNs = camera.ImageTimestampNs;
             if (m_AsyncReadback)
             {
-                if (m_ReadbackInFlight)
-                    return;
                 m_ReadbackInFlight = true;
-                AsyncGPUReadback.Request(m_Camera, 0, TextureFormat.RGBA32, OnReadback);
+                AsyncGPUReadback.Request(m_Small, 0, TextureFormat.RGBA32, OnReadback);
             }
             else
             {
-                var width = m_Camera.width;
-                var height = m_Camera.height;
-                if (m_Pixels == null || m_Pixels.Length != width * height)
-                    m_Pixels = new Color32[width * height];
-                m_Camera.GetPixels32(m_Pixels);
-                using (var pixels = new NativeArray<Color32>(m_Pixels, Allocator.Temp))
-                    TakeFrame(pixels, width, height, "read with GetPixels32");
+                var previous = RenderTexture.active;
+                RenderTexture.active = m_Small;
+                m_ReadTexture.ReadPixels(new Rect(0f, 0f, m_Small.width, m_Small.height), 0, 0, false);
+                RenderTexture.active = previous;
+                TakeFrame(m_ReadTexture.GetRawTextureData<Color32>(), m_Small.width, m_Small.height, "read with ReadPixels");
             }
             m_ReadMs += stopwatch.Elapsed.TotalMilliseconds;
+        }
+
+        void EnsureSmall(int imageWidth, int imageHeight)
+        {
+            var width = Mathf.Min(m_ModelWidth, imageWidth);
+            var height = Mathf.Max(16, Mathf.RoundToInt(width * imageHeight / (float)imageWidth));
+            if (m_Small != null && m_Small.width == width && m_Small.height == height)
+                return;
+            if (m_Small != null)
+            {
+                m_Small.Release();
+                Destroy(m_Small);
+            }
+            m_Small = new RenderTexture(width, height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear) { name = "Pinch Camera" };
+            m_Small.Create();
+            if (m_ReadTexture != null)
+                Destroy(m_ReadTexture);
+            m_ReadTexture = new Texture2D(width, height, TextureFormat.RGBA32, false, true);
+            m_AsyncReadback = SystemInfo.supportsAsyncGPUReadback &&
+                              SystemInfo.IsFormatSupported(m_Small.graphicsFormat, GraphicsFormatUsage.ReadPixels);
         }
 
         void OnReadback(AsyncGPUReadbackRequest request)
         {
             m_ReadbackInFlight = false;
-            if (!m_Running || m_Camera == null)
+            if (!m_Running)
                 return;
             if (request.hasError)
             {
@@ -443,41 +626,24 @@ namespace CardboardXR.Hands
             CopyRows(source, m_NextImage, width, height);
             m_NextWidth = width;
             m_NextHeight = height;
+            m_NextTimestampNs = m_PendingTimestampNs;
             m_HasNextImage = true;
             m_Reads++;
-            LogCamera(width, height, how);
-        }
-
-        // Color32 is laid out as RGBA bytes, which is what the samplers read, so rows copy whole.
-        // Upside down on the screen when the camera sensor's rotation is 180.
-        void CopyRows(NativeArray<Color32> source, NativeArray<byte> target, int width, int height)
-        {
-            // Both readbacks give the bottom row first, so the rows are always turned over, whatever
-            // videoVerticallyMirrored says: on the iPhone it says true, and trusting it left the image
-            // mirrored top to bottom. That went unnoticed at first because a mirrored hand also reads as
-            // the other hand, which cancelled out in the palm test; it showed as the settings button
-            // moving down when the hand moved up (SettingsSummoner).
-            var turned = Mathf.RoundToInt(m_Camera.videoRotationAngle) % 360 == 180;
-            var flipRows = !turned;
-            var pixels = target.Reinterpret<Color32>(1);
-            for (var y = 0; y < height; y++)
+            if (!m_LoggedCamera)
             {
-                var row = (flipRows ? height - 1 - y : y) * width;
-                NativeArray<Color32>.Copy(source, row, pixels, y * width, width);
-                if (!turned)
-                    continue;
-                for (int left = y * width, right = left + width - 1; left < right; left++, right--)
-                    (pixels[left], pixels[right]) = (pixels[right], pixels[left]);
+                m_LoggedCamera = true;
+                Debug.Log($"[Pinch] The models see the camera at {width}x{height}; frames {how}");
             }
         }
 
-        void LogCamera(int width, int height, string how)
+        // Color32 is laid out as RGBA bytes, which is what the samplers read, so rows copy whole. Both
+        // readbacks give the bottom row first, and the image is already upright, so the rows are
+        // turned over.
+        static void CopyRows(NativeArray<Color32> source, NativeArray<byte> target, int width, int height)
         {
-            if (m_LoggedCamera)
-                return;
-            m_LoggedCamera = true;
-            Debug.Log($"[Pinch] Camera gives {width}x{height}, turned {m_Camera.videoRotationAngle:F0} deg, " +
-                      $"mirrored {m_Camera.videoVerticallyMirrored}; frames {how}");
+            var pixels = target.Reinterpret<Color32>(1);
+            for (var y = 0; y < height; y++)
+                NativeArray<Color32>.Copy(source, (height - 1 - y) * width, pixels, y * width, width);
         }
 
         static void CopyTo(Tensor<float> tensor, float[] values)
@@ -497,9 +663,9 @@ namespace CardboardXR.Hands
                       $"{m_Frames / seconds:F1} analyzed, " +
                       $"detector {m_Detections} runs at {m_DetectMs / Mathf.Max(1, m_Detections):F0} ms, " +
                       $"landmarker {m_Landmarks} runs at {m_LandmarkMs / Mathf.Max(1, m_Landmarks):F0} ms (including waits); " +
-                      $"hand {(SeesHand ? "in view" : "not in view")}, {m_Losses} lost, {m_Pinches} pinches, " +
+                      $"{FollowedCount()} hands in view, {m_Losses} lost, {m_Pinches} pinches, {m_TwoHanded} two-handed, " +
                       (float.IsPositiveInfinity(m_MinRatio) ? "no fingertips seen" : $"fingertip gap {m_MinRatio:F2}-{m_MaxRatio:F2} palm widths"));
-            m_Reads = m_Frames = m_Detections = m_Landmarks = m_Losses = m_Pinches = 0;
+            m_Reads = m_Frames = m_Detections = m_Landmarks = m_Losses = m_Pinches = m_TwoHanded = 0;
             m_ReadMs = m_DetectMs = m_LandmarkMs = 0;
             m_MinRatio = float.PositiveInfinity;
             m_MaxRatio = 0f;

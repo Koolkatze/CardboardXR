@@ -20,6 +20,8 @@ namespace ProjectBootstrap
         const string k_AndroidNamespace = "http://schemas.android.com/apk/res/android";
         static readonly string[] k_Permissions =
         {
+            // The 3DoF camera (PhoneCamera), opened directly; ARCore's own manifest asks for it too.
+            "android.permission.CAMERA",
             "android.permission.SYSTEM_ALERT_WINDOW",
             "android.permission.POST_NOTIFICATIONS",
         };

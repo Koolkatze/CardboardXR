@@ -38,11 +38,15 @@ namespace CardboardXR.Demos
         [SerializeField] string m_LobbyScenePath = "Assets/_Project/Demos/Lobby/Lobby.unity";
         [Tooltip("What the lobby switches on when the app starts: 6DoF and passthrough, so the room can be scanned " +
                  "there (LobbyFlow) and demos start with tracking running and surfaces found.")]
-        [SerializeField] DemoRequirements m_LobbyRequirements = new() { SixDof = Need.On, Passthrough = Need.On, Hands = Need.On };
+        // The app runs in 3DoF, with passthrough from the phone's own camera; demos that need 6DoF turn
+        // it on while they run. The "dof 6" launch option starts the lobby as it once was, in 6DoF with
+        // hand tracking (SixDofLobby).
+        [SerializeField] DemoRequirements m_LobbyRequirements = new() { SixDof = Need.Off, Passthrough = Need.On, Hands = Need.Any };
         [SerializeField] List<Entry> m_Demos = new();
 
         public string LobbyScenePath => m_LobbyScenePath;
         public DemoRequirements LobbyRequirements => m_LobbyRequirements;
+        public static readonly DemoRequirements SixDofLobby = new() { SixDof = Need.On, Passthrough = Need.On, Hands = Need.On };
         public IReadOnlyList<Entry> Demos => m_Demos;
 
         public bool TryGet(int index, out Entry entry)

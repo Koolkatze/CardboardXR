@@ -11,7 +11,11 @@ namespace CardboardXR.Demos
     // CardboardXR: the app runs on a virtual display of its own, landscape if it can turn (AndroidApps),
     // and its frames come into a texture on a panel 2 m ahead. Look at it and tap the screen, or pinch,
     // to touch it there; hold the tap or the pinch and look along to drag (and scroll). Under it, Back
-    // (the app's back key), Move here (in front of you again) and Close.
+    // (the app's back key), Move here (in front of you again) and Close, and below that a handle
+    // (AppScreenHandle): pinch it, or hold a tap on it, and the screen follows the hand (or the gaze)
+    // around you. Pinching with both hands, the first on the screen or its handle, resizes it by how
+    // far apart the hands go, and moves it with them (PinchSensor.BothPinched); the touch the first
+    // pinch began is cancelled. Its size is kept between runs (k_MinScale to k_MaxScale).
     //   Making the display and opening an app on it takes the shell user's rights, which Shizuku lends
     //   (CardboardXRScreen.java and CardboardXRScreenService.java do the Android side), so the screen
     //   needs Shizuku running and CardboardXR allowed in it. Without, the screen shows why instead
@@ -38,7 +42,14 @@ namespace CardboardXR.Demos
         public const int k_Down = 0;
         public const int k_Up = 1;
         public const int k_Move = 2;
+        public const int k_Cancel = 3;
         const int k_KeyBack = 4;
+        public const float k_MinScale = 0.4f;
+        public const float k_MaxScale = 3f;
+        const string k_ScaleKey = "AppScreenScale";
+        // How quickly the screen catches up with a hand moving or resizing it: most of the way in this
+        // many seconds, as hands are seen only a few times a second.
+        const float k_FollowSeconds = 0.12f;
 
         public const int k_LongSidePixels = 960;
         public const int k_ShortSidePixels = 540;
@@ -72,6 +83,25 @@ namespace CardboardXR.Demos
         string m_LastStatus;
         Vector2 m_LastTouch;
         float m_NextPoll;
+        // How big it is against its usual size, and where it's headed while a hand moves or resizes it.
+        float m_Scale = 1f;
+        float m_TargetScale = 1f;
+        Vector3 m_TargetDirection;
+        bool m_Following;
+        // A pinch on the screen or its handle is held (AppScreenSurface, AppScreenHandle).
+        bool m_PinchHeld;
+        AppScreenSurface m_Surface;
+        // Moving by the handle: what points (the pinching hand, or the gaze) and where, when it began.
+        bool m_Moving;
+        bool m_MoveByHand;
+        Vector3 m_MoveStartPointer;
+        Vector3 m_MoveStartDirection;
+        // Resizing with both hands: their angle apart, middle and the screen, when it began.
+        bool m_Resizing;
+        float m_ResizeStartAngle;
+        float m_ResizeStartScale;
+        Vector3 m_ResizeStartMiddle;
+        Vector3 m_ResizeStartDirection;
         int m_Generation = -1;
 #if UNITY_ANDROID && !UNITY_EDITOR
         AndroidJavaObject[] m_Buffers;
@@ -282,8 +312,126 @@ namespace CardboardXR.Demos
         void Place()
         {
             var core = CoreServices.Instance;
+            m_Following = false;
             if (core != null)
                 WorldUi.PlaceInFront(m_Panel, core.Head, k_Distance, 0f);
+        }
+
+        // Its usual size on its canvas (M3Canvas), times m_Scale.
+        void ApplyScale()
+        {
+            if (m_Panel != null)
+                m_Panel.localScale = Vector3.one * (M3Theme.DpToMeters(1f, k_Distance) * m_Scale);
+        }
+
+        // Toward the head from the screen, at k_Distance along direction, facing the head.
+        void PlaceAlong(Vector3 direction)
+        {
+            var core = CoreServices.Instance;
+            if (core == null || m_Panel == null || direction.sqrMagnitude < 1e-6f)
+                return;
+            var head = core.Head.position;
+            var position = head + direction.normalized * k_Distance;
+            m_Panel.SetPositionAndRotation(position, Quaternion.LookRotation(position - head, Vector3.up));
+        }
+
+        Vector3 PanelDirection()
+        {
+            var core = CoreServices.Instance;
+            return core == null || m_Panel == null ? Vector3.forward : (m_Panel.position - core.Head.position).normalized;
+        }
+
+        // AppScreenSurface and AppScreenHandle: a pinch on them is held, or let go.
+        public void SetPinchHeld(bool held) => m_PinchHeld = held;
+
+        // The handle was pinched (byHand, so the pinching hand moves it if it's seen) or tapped and held
+        // (the gaze moves it).
+        public void BeginMove(bool byHand)
+        {
+            var core = CoreServices.Instance;
+            if (core == null || m_Panel == null)
+                return;
+            var sensor = Hands.PinchSensor.Instance;
+            m_MoveByHand = byHand && sensor != null && sensor.TryGetPinchDirection(0, out m_MoveStartPointer);
+            if (!m_MoveByHand)
+                m_MoveStartPointer = core.Head.forward;
+            m_MoveStartDirection = PanelDirection();
+            m_TargetDirection = m_MoveStartDirection;
+            m_Moving = true;
+            m_Following = true;
+            Debug.Log($"[Apps] Moving the screen with {(m_MoveByHand ? "the hand" : "the gaze")}");
+        }
+
+        public void EndMove()
+        {
+            if (!m_Moving)
+                return;
+            m_Moving = false;
+            Debug.Log("[Apps] Moved the screen");
+        }
+
+        // Moves and resizes it as the hands or the gaze say, easing toward where they point.
+        void LateUpdate()
+        {
+            if (m_Panel == null || !m_Open)
+                return;
+            var core = CoreServices.Instance;
+            var sensor = Hands.PinchSensor.Instance;
+            var both = sensor != null && sensor.BothPinched;
+            if (!m_Resizing && both && m_PinchHeld)
+                BeginResize(sensor);
+            else if (m_Resizing && !both)
+                EndResize();
+
+            if (m_Resizing)
+            {
+                if (sensor.TryGetPinchDirection(0, out var a) && sensor.TryGetPinchDirection(1, out var b))
+                {
+                    var angle = Mathf.Max(1f, Vector3.Angle(a, b));
+                    m_TargetScale = Mathf.Clamp(m_ResizeStartScale * angle / m_ResizeStartAngle, k_MinScale, k_MaxScale);
+                    m_TargetDirection = Quaternion.FromToRotation(m_ResizeStartMiddle, (a + b).normalized) * m_ResizeStartDirection;
+                }
+            }
+            else if (m_Moving && core != null)
+            {
+                var pointer = core.Head.forward;
+                if (!m_MoveByHand || sensor.TryGetPinchDirection(0, out pointer))
+                    m_TargetDirection = Quaternion.FromToRotation(m_MoveStartPointer, pointer) * m_MoveStartDirection;
+            }
+            if (!m_Following)
+                return;
+            var step = 1f - Mathf.Exp(-Time.unscaledDeltaTime / k_FollowSeconds);
+            m_Scale = Mathf.Lerp(m_Scale, m_TargetScale, step);
+            ApplyScale();
+            PlaceAlong(Vector3.Slerp(PanelDirection(), m_TargetDirection, step));
+            if (!m_Moving && !m_Resizing && Mathf.Abs(m_Scale - m_TargetScale) < 0.002f &&
+                Vector3.Angle(PanelDirection(), m_TargetDirection) < 0.05f)
+                m_Following = false;
+        }
+
+        void BeginResize(Hands.PinchSensor sensor)
+        {
+            if (!sensor.TryGetPinchDirection(0, out var a) || !sensor.TryGetPinchDirection(1, out var b))
+                return;
+            // The pinch that began a touch, or a move, is now this.
+            m_Surface?.CancelPinch();
+            EndMove();
+            m_Resizing = true;
+            m_Following = true;
+            m_ResizeStartAngle = Mathf.Max(2f, Vector3.Angle(a, b));
+            m_ResizeStartScale = m_TargetScale;
+            m_ResizeStartMiddle = (a + b).normalized;
+            m_ResizeStartDirection = PanelDirection();
+            m_TargetDirection = m_ResizeStartDirection;
+            Debug.Log($"[Apps] Resizing the screen with both hands, {m_ResizeStartAngle:F0} deg apart");
+        }
+
+        void EndResize()
+        {
+            m_Resizing = false;
+            PlayerPrefs.SetFloat(k_ScaleKey, m_TargetScale);
+            PlayerPrefs.Save();
+            Debug.Log($"[Apps] Resized the screen to {m_TargetScale:F2}x its usual size");
         }
 
         // A touch where the ray meets the screen's plane (held to its edges, so a drag that runs off it
@@ -461,6 +609,8 @@ namespace CardboardXR.Demos
             var size = PanelDp(landscape);
             var screenSize = ScreenDp(landscape);
             m_Panel = WorldUi.Panel("App Screen", transform, size, k_Distance);
+            m_Scale = m_TargetScale = Mathf.Clamp(PlayerPrefs.GetFloat(k_ScaleKey, 1f), k_MinScale, k_MaxScale);
+            ApplyScale();
             var screenY = size.y / 2f - k_Padding - screenSize.y / 2f;
 
             var screenObject = new GameObject("Screen", typeof(RectTransform));
@@ -473,7 +623,20 @@ namespace CardboardXR.Demos
             m_Screen.raycastTarget = true;
             // The frames' rows come top first, a texture's bottom first.
             m_Screen.uvRect = new Rect(0f, 1f, 1f, -1f);
-            screenObject.AddComponent<AppScreenSurface>().Initialize(this);
+            m_Surface = screenObject.AddComponent<AppScreenSurface>();
+            m_Surface.Initialize(this);
+
+            // The handle under the panel: a pill, in a larger area that takes the gaze.
+            var handleObject = new GameObject("Handle", typeof(RectTransform));
+            var handle = (RectTransform)handleObject.transform;
+            handle.SetParent(m_Panel, false);
+            handle.anchoredPosition = new Vector2(0f, -size.y / 2f - 28f);
+            handle.sizeDelta = new Vector2(240f, 44f);
+            var handleArea = handleObject.AddComponent<Image>();
+            handleArea.color = Color.clear;
+            handleArea.raycastTarget = true;
+            M3.Surface("Pill", handle, Vector2.zero, new Vector2(160f, 10f), M3Theme.OnSurfaceVariant, M3Theme.k_ShapeFull);
+            handleObject.AddComponent<AppScreenHandle>().Initialize(this);
 
             m_Status = M3.Text("Status", m_Panel, "", M3Theme.Type.BodyLarge, new Vector2(0f, screenY),
                 new Vector2(screenSize.x - 48f, 120f), M3Theme.OnSurfaceVariant);

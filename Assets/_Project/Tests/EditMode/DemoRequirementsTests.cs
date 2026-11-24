@@ -16,10 +16,10 @@ namespace CardboardXR.Stereo.Tests
         }
 
         [Test]
-        public void PassthroughTurnsSixDofOn()
+        public void PassthroughStaysInThreeDof()
         {
             var state = CoreState.Resolve(k_ThreeDof, new DemoRequirements { Passthrough = Need.On });
-            Assert.AreEqual(new CoreState(true, true, true), state);
+            Assert.AreEqual(new CoreState(false, true, true), state);
         }
 
         [Test]
@@ -30,17 +30,32 @@ namespace CardboardXR.Stereo.Tests
         }
 
         [Test]
-        public void SixDofOffTurnsPassthroughOff()
+        public void SixDofOffKeepsPassthrough()
         {
             var state = CoreState.Resolve(k_Passthrough, new DemoRequirements { SixDof = Need.Off });
-            Assert.AreEqual(new CoreState(false, false, true), state);
+            Assert.AreEqual(new CoreState(false, true, true), state);
         }
 
         [Test]
-        public void SixDofOffWinsOverPassthroughOn()
+        public void SixDofOffWinsOverHandsOn()
         {
-            var state = CoreState.Resolve(k_ThreeDof, new DemoRequirements { SixDof = Need.Off, Passthrough = Need.On });
-            Assert.AreEqual(new CoreState(false, false, true), state);
+            var state = CoreState.Resolve(k_ThreeDof, new DemoRequirements { SixDof = Need.Off, Passthrough = Need.On, Hands = Need.On });
+            Assert.AreEqual(new CoreState(false, true, true), state);
+        }
+
+        [Test]
+        public void TheLobbyIsThreeDofPassthrough()
+        {
+            var catalog = UnityEngine.ScriptableObject.CreateInstance<DemoCatalog>();
+            try
+            {
+                Assert.AreEqual(new CoreState(false, true, true), CoreState.Resolve(k_Passthrough, catalog.LobbyRequirements));
+                Assert.AreEqual(new CoreState(true, true, true), CoreState.Resolve(k_ThreeDof, DemoCatalog.SixDofLobby));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(catalog);
+            }
         }
 
         [Test]

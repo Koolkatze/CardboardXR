@@ -54,6 +54,7 @@ namespace CardboardXR.UI
             ["apps"] = 0xe5c3,
             ["bolt"] = 0xea0b,
             ["zoom_in"] = 0xe8ff,
+            ["photo_camera"] = 0xe412,
         };
 
         // The icon's character, for a TMP text set in the icon font; empty for an unknown name.

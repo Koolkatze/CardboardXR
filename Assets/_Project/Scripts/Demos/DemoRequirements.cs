@@ -17,7 +17,8 @@ namespace CardboardXR.Demos
     {
         public Need SixDof;
         public Need Passthrough;
-        // Hand tracking, the largest part of the app's heat. It only runs in 6DoF.
+        // Hand tracking in 3D, the largest part of the app's heat. It only runs in 6DoF; in 3DoF a pinch
+        // still clicks (PinchSensor), whatever this says.
         public Need Hands;
         // Scan the whole room for surfaces on entering, not just for the floor as 6DoF does: for a
         // demo that puts things on tables and walls.
@@ -40,25 +41,19 @@ namespace CardboardXR.Demos
             Hands = hands;
         }
 
-        // What to switch to for a demo, from what's on now. Passthrough and hands need the camera,
-        // so either one asked for turns 6DoF on; a demo that wants 6DoF off can have neither.
+        // What to switch to for a demo, from what's on now. Hand tracking needs ARCore, so asking for it
+        // turns 6DoF on; passthrough doesn't, as 3DoF has the phone's own camera (PhoneCamera). A demo
+        // that wants 6DoF off can't have hand tracking.
         public static CoreState Resolve(CoreState current, DemoRequirements needs)
         {
             var passthrough = Pick(needs.Passthrough, current.Passthrough);
             var hands = Pick(needs.Hands, current.Hands);
             var sixDof = Pick(needs.SixDof, current.SixDof);
+            // Hands only run in 6DoF; leaving them on means they're back with it.
             if (needs.SixDof == Need.Off)
-            {
-                passthrough = false;
-                // Hands only run in 6DoF; leaving them on means they're back with it.
                 sixDof = false;
-            }
-            else if (needs.Passthrough == Need.On || needs.Hands == Need.On)
-            {
+            else if (needs.Hands == Need.On)
                 sixDof = true;
-            }
-            if (!sixDof)
-                passthrough = false;
             return new CoreState(sixDof, passthrough, hands);
         }
 

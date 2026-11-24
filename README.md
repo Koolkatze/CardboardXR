@@ -108,7 +108,9 @@ phone's home screen. The app logs the options it received at startup (`[Stereo] 
 |---|---|
 | `demo N` | Start in demo N (its index in `Assets/_Project/Demos/DemoCatalog.asset`, from 0) instead of the lobby |
 | `pinch 0` | Pinch-to-click off in 3DoF, for measuring its heat (it's otherwise always on) |
-| `dof 3` | Start the lobby in 3DoF, with no room scan (it starts in 6DoF passthrough otherwise) |
+| `dof 6` | Start the lobby as it once was, in 6DoF passthrough with hand tracking and a room scan (it starts in 3DoF passthrough from the phone's camera otherwise) |
+| `cameraWidth N` | Android, 3DoF: width of the phone camera's stream for passthrough and pinches (default 1280, 16:9) |
+| `cameraFps N` | Android, 3DoF: the phone camera's frame rate, steady where the camera allows (default 30) |
 | `passthrough 1` | Start with the camera passthrough view |
 | `passthroughFill 0` | Passthrough at true scale, a window with a border, instead of enlarged to fill the view |
 | `mono 1` | One full-screen view with no lens distortion, for use without a viewer |
@@ -140,15 +142,19 @@ phone's home screen. The app logs the options it received at startup (`[Stereo] 
   demo to another. It shows six apps a page; with more, arrows on either side turn the page. On
   Android it also opens the phone's own apps (below). *Apps* on the settings panel shows and hides
   it. The lobby is a checkerboard room
-  to start from, and opens with the library showing. As the app starts, the lobby is in 6DoF
-  passthrough and first scans your room: look around at the floor and any tables until it says it's
-  done (or tap *Skip*), so the demos start with tracking running and surfaces found. Each demo switches on what it needs (6DoF,
-  passthrough, hands) and leaving puts back what you had.
+  to start from, and opens with the library showing. The app runs in **3DoF**: the lobby starts
+  in 3DoF passthrough from the phone's own camera (no ARCore), with pinches seen by the same camera.
+  Each demo switches on what it needs (Sandbox, Paint, Portal and Rush turn 6DoF on, with hand
+  tracking and ARCore's camera) and leaving puts back what you had. The `dof 6` launch option starts
+  the lobby in 6DoF instead, scanning your room first.
 - **The phone's own apps** (Android): a rail at the library's left switches between *XR* (the lobby
   and demos) and *Android*, every app the phone's launcher shows, with its icon, in the launcher's
   order. Pick one and it opens **on a screen in the scene**, in stereo like everything else, 2 m
   ahead: look at it and tap the phone's screen (or pinch) to touch it there, hold and look along to
-  drag and scroll. Under it, *Back*, *Move here* and *Close*. An app that can turn gets a
+  drag and scroll. Under it, *Back*, *Move here* and *Close*, and below them a handle: pinch it (or
+  hold a tap on it) and the screen follows your hand (or your gaze) around you. Pinch with both
+  hands, the first on the screen or its handle, and spread or close them to make it bigger or
+  smaller (0.4x to 3x, kept); moving them together moves it too. An app that can turn gets a
   **landscape** screen; one that only runs upright gets an upright one, and a landscape app stays
   landscape. Looking at an app says which it is, and the rail's *Landscape* switch, in the Android
   section, turns landscape off and on (it's kept). Its keyboard shows on its own screen.
@@ -195,8 +201,10 @@ phone's home screen. The app logs the options it received at startup (`[Stereo] 
   through the door behind; walk back through to return. It's in passthrough, so all of it is flat.
 - **The settings panel**, in every scene: hold a hand up with its palm toward you and a gear button
   appears between your thumb and index finger; pinch to open the panel in front of you. It has
-  *Apps* (the app library), *Recenter* and *Scan Room* (in 6DoF: scans again, or ends a scan), the toggles *6DoF* and *Passthrough*, and,
-  while passthrough is on, its digital zoom (*1x*, *2x*, *3x*, *6x*: each pinch the next; kept between runs). It follows
+  *Apps* (the app library), *Recenter*, *Scan Room* (in 6DoF: scans again, or ends a scan), the
+  toggle *Passthrough* and, while passthrough is on, the **camera lens** (in 3DoF, on a phone with
+  more than one rear lens: the real lenses by their zoom, such as *0.5x*, *1x*, *5x*; each pinch the
+  next) and the digital zoom on top (*1x*, *2x*, *3x*, *6x*). Both are kept between runs. It follows
   you lazily as you turn; the *X* below it closes it. Look at a button and tap the screen, or
   pinch. Holding a tap recenters.
 - **Surfaces** are found by the lobby's scan at launch, which runs until it finds nothing new. When

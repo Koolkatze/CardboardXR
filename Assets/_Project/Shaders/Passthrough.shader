@@ -57,7 +57,9 @@ Shader "CardboardXR/Passthrough"
             {
                 Varyings output;
                 output.positionCS = TransformObjectToHClip(input.positionOS);
-                output.uv = input.uv;
+                // The texture's scale and offset pick the part shown: the zoom window of the phone
+                // camera's image (PassthroughController).
+                output.uv = TRANSFORM_TEX(input.uv, _BaseMap);
                 return output;
             }
 

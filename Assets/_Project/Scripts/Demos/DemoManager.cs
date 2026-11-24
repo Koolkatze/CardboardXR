@@ -73,14 +73,12 @@ namespace CardboardXR.Demos
             {
                 if (index >= 0)
                     Debug.LogWarning($"[Demos] No demo {index}: the catalog has {m_Catalog.Demos.Count}");
-                // The lobby starts in 6DoF passthrough, where LobbyFlow scans the room, unless the "dof 3"
-                // launch option asks for 3DoF.
-                if (LaunchOptions.GetInt("dof", 6) == 6)
-                {
-                    var state = CoreState.Resolve(m_Core.State, m_Catalog.LobbyRequirements);
-                    Debug.Log($"[Demos] Starting the lobby in {state}");
-                    m_Core.Apply(state);
-                }
+                // The lobby starts in 3DoF passthrough from the phone's camera, unless the "dof 6" launch
+                // option asks for 6DoF, where LobbyFlow scans the room first.
+                var lobby = LaunchOptions.GetInt("dof", 3) == 6 ? DemoCatalog.SixDofLobby : m_Catalog.LobbyRequirements;
+                var state = CoreState.Resolve(m_Core.State, lobby);
+                Debug.Log($"[Demos] Starting the lobby in {state}");
+                m_Core.Apply(state);
                 yield return Switch(null);
             }
         }

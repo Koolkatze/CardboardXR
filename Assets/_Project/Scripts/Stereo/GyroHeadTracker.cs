@@ -82,6 +82,12 @@ namespace CardboardXR.Stereo
         // the head itself.
         public bool DrivesTransform { get; set; } = true;
 
+        // The rotation the head was last set from while this drives it (3DoF), in the tracker's own
+        // space, without recentering; and an event raised just after, the last time just before
+        // rendering, for anything that must follow the head exactly (PhoneCamera's images).
+        public Quaternion LastRotation { get; private set; } = Quaternion.identity;
+        public event System.Action PoseUpdated;
+
         // Now, on the clock every timestamp this tracker records is on: the native sensors' clock
         // when they run, and the Input System's otherwise. Callers comparing times against the
         // tracker's must use this rather than NativeImu.NowNs, which is 0 where there are no
@@ -251,7 +257,9 @@ namespace CardboardXR.Stereo
                 m_RecenterWhenAligned = false;
                 Recenter();
             }
-            transform.localRotation = m_Recenter * Quaternion.LookRotation(forward, up);
+            LastRotation = Quaternion.LookRotation(forward, up);
+            transform.localRotation = m_Recenter * LastRotation;
+            PoseUpdated?.Invoke();
         }
 
         // The head rotation predicted for the display, in the tracker's own gravity-aligned space,

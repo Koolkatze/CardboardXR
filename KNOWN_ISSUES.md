@@ -24,10 +24,26 @@ There's one camera, so passthrough is one image, the same in both eyes, drawn at
 gives no sense of depth, and how far the hand is from a virtual object can't be judged by eye. A
 cube turns cyan when a pinch would grab it, to make up for that.
 
+### 3DoF passthrough and the camera lenses
+
+In 3DoF the phone's camera is opened directly (Camera2), not through ARCore. Its lenses are found from
+each lens's focal length and sensor size (`[Camera] Rear lenses` in the log). On a phone whose main
+camera is a logical multi-camera, the others are reached through its zoom ratio, as the camera app
+does, and the phone decides when to switch: a telephoto may stay on the main lens, cropped, when
+the subject is closer than it can focus, or in dim light. Phones that list a lens on its own are
+opened by id. The picture is turned upright from the sensor's orientation and the display's
+rotation; this hasn't been tried on every phone. The stream asks for a steady frame rate, so in dim
+light it gets darker and noisier rather than slower.
+
+Pinches and the two-handed gestures use the same camera as passthrough, so with a telephoto chosen a
+hand held close is rarely seen: choose a wider lens to use your hands. Following two hands runs the
+landmarker once per hand, so with both in view each is analyzed about half as often, and the screen
+eases after them; it moves and resizes smoothly but a little behind.
+
 ### Passthrough changes only with each camera image
 
 The picture of the room changes 30 times a second, or 60 on phones whose camera does that for ARCore;
-the `[AR]` log line gives the actual rate (`camera N Hz`). What's virtual is drawn at
+the `[AR]` log line (6DoF) or the `[Camera]` one (3DoF) gives the actual rate. What's virtual is drawn at
 the display's rate. Turning the head stays smooth, as the image is held where it was taken (or
 turned on by the gyroscope when enlarged), but things moving in the room, such as a hand, move in
 steps.

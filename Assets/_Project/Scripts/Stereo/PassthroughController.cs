@@ -24,11 +24,15 @@ namespace CardboardXR.Stereo
     // image's pose while the eyes turn. Enlarged, it must turn faster than the head, so between images
     // the screen is turned on by the head's turn since the image was taken, from the gyroscope
     // (MagnifiedTurn), just before each frame is drawn; otherwise the room would move with the head
-    // and then jump at every new image. Passthrough needs 6DoF, since ARCore must run, and hides the
-    // virtual environment (every VirtualEnvironment, in whichever scene).
-    // Switching to 3DoF turns it off until 6DoF is back. The "passthrough" launch option (1) starts
-    // with it on. While it's on, the eyes move onto the camera (HeadPoseFusion.EyesAtCamera), so the
-    // image is seen from where it was taken. The image is flat, so things in it only line up in both
+    // and then jump at every new image. It hides the virtual environment (every VirtualEnvironment, in
+    // whichever scene).
+    // In 3DoF there's no AR session: the image comes from the phone's camera opened directly
+    // (PhoneCamera), from whichever real lens the panel's Camera button chose, and the screen is placed
+    // around the head where the head was when the image was taken (from the gyroscope's history), so
+    // it stays put as the head turns in the same way. Switching between 3DoF and 6DoF switches the
+    // source. The "passthrough" launch option (1) starts with it on. While it's on in 6DoF, the eyes
+    // move onto the camera (HeadPoseFusion.EyesAtCamera), so the image is seen from where it was
+    // taken. The image is flat, so things in it only line up in both
     // eyes at its own distance; FocusDistance moves it to what the user is looking at, such as a
     // tracked hand. Anything else drawn keeps its own depth and fights that flat image, which is seen
     // as doubling, so while passthrough is on the rig's eyes move together (StereoRig.MonoEyes) and
@@ -60,6 +64,8 @@ namespace CardboardXR.Stereo
         [SerializeField] M3Button m_Toggle;
         [Tooltip("The panel's Zoom button, shown while passthrough is on: steps through k_ZoomSteps.")]
         [SerializeField] M3Button m_ZoomButton;
+        [Tooltip("The panel's Camera button, shown while passthrough is on in 3DoF with more than one lens: steps through the real lenses.")]
+        [SerializeField] M3Button m_LensButton;
         [Tooltip("How far in front of the camera the image is shown without a focus. It's one flat image, so everything in it appears at this depth.")]
         [SerializeField] float m_Distance = 2f;
         [Tooltip("Height of the passthrough texture in pixels; its width follows the camera image's shape.")]
@@ -72,8 +78,8 @@ namespace CardboardXR.Stereo
         CommandBuffer m_Commands;
         RenderTexture m_Texture;
         bool m_On;
-        // 3DoF turned passthrough off, so it comes back with 6DoF.
-        bool m_ResumeWithSixDof;
+        // Where the image comes from while it's on: ARCore's camera in 6DoF, the phone's own in 3DoF.
+        bool m_FromPhone;
         // ArDebugView drives the AR camera itself.
         bool m_ArViewActive;
         // The image's frustum at unit distance, in the AR camera's x and y, once an image arrived.
@@ -122,6 +128,15 @@ namespace CardboardXR.Stereo
             m_ZoomIndex = Mathf.Clamp(PlayerPrefs.GetInt(k_ZoomKey, 0), 0, k_ZoomSteps.Length - 1);
             ShowZoom();
             m_Fusion.PoseUpdated += PlaceScreen;
+            if (m_Fusion.Tracker != null)
+                m_Fusion.Tracker.PoseUpdated += PlaceScreen;
+        }
+
+        // The panel's Camera button: the next real lens, in 3DoF.
+        public void NextLens()
+        {
+            if (PhoneCamera.Instance != null)
+                PhoneCamera.Instance.NextLens();
         }
 
         // The digital zoom now, on top of filling the view.
@@ -139,10 +154,18 @@ namespace CardboardXR.Stereo
 
         void ShowZoom()
         {
-            if (m_ZoomButton == null)
-                return;
-            m_ZoomButton.Text = $"{Zoom}x";
-            m_ZoomButton.gameObject.SetActive(m_On);
+            if (m_ZoomButton != null)
+            {
+                m_ZoomButton.Text = $"{Zoom}x";
+                m_ZoomButton.gameObject.SetActive(m_On);
+            }
+            if (m_LensButton != null)
+            {
+                var camera = PhoneCamera.Instance;
+                var lenses = camera != null ? camera.Lenses.Count : 0;
+                m_LensButton.Text = lenses > 0 ? camera.CurrentLens.Label : "1x";
+                m_LensButton.gameObject.SetActive(m_On && m_FromPhone && lenses > 1);
+            }
         }
 
         // How much the image is enlarged about straight ahead to cover the view: the camera's frustum
@@ -220,6 +243,8 @@ namespace CardboardXR.Stereo
         // After the other components' OnEnable, so the mode set here sticks.
         void Start()
         {
+            if (PhoneCamera.Instance != null)
+                PhoneCamera.Instance.LensChanged += ShowZoom;
             m_ArViewActive = LaunchOptions.GetInt("arView", 0) != 0;
             if (LaunchOptions.GetInt("passthrough", 0) != 0)
                 SetPassthrough(true);
@@ -228,9 +253,15 @@ namespace CardboardXR.Stereo
         void OnDestroy()
         {
             if (m_Fusion != null)
+            {
                 m_Fusion.PoseUpdated -= PlaceScreen;
+                if (m_Fusion.Tracker != null)
+                    m_Fusion.Tracker.PoseUpdated -= PlaceScreen;
+            }
+            if (PhoneCamera.Instance != null)
+                PhoneCamera.Instance.LensChanged -= ShowZoom;
             if (m_On)
-                m_CameraManager.frameReceived -= OnCameraFrame;
+                StopSource();
             if (m_Texture != null)
             {
                 m_Texture.Release();
@@ -245,13 +276,8 @@ namespace CardboardXR.Stereo
 
         public void Toggle() => Choose(!m_On);
 
-        // Turns it on or off as the user's own choice, so 3DoF turning it off doesn't bring it back
-        // with 6DoF later.
-        public void Choose(bool on)
-        {
-            m_ResumeWithSixDof = false;
-            SetPassthrough(on);
-        }
+        // Turns it on or off as the user's own choice.
+        public void Choose(bool on) => SetPassthrough(on);
 
         public void SetPassthrough(bool on)
         {
@@ -260,26 +286,61 @@ namespace CardboardXR.Stereo
 
             m_On = on;
             if (on)
+                StartSource(m_Fusion.CurrentMode == HeadPoseFusion.Mode.ThreeDof);
+            else
+                StopSource();
+
+            if (m_Rig != null)
+                m_Rig.MonoEyes = on;
+            VirtualEnvironment.SetAllHidden(on);
+            if (m_Toggle != null)
+                m_Toggle.Selected = on;
+            ShowZoom();
+            Debug.Log(on ? $"[Passthrough] On, from {(m_FromPhone ? "the phone's camera (3DoF)" : "ARCore's camera (6DoF)")}, " +
+                           $"{(m_Fill ? "filling the view" : "at true scale")}, zoom {Zoom}x" : "[Passthrough] Off");
+        }
+
+        // Starts taking images from the phone's camera (3DoF) or ARCore's (6DoF). The screen shows once
+        // the first one has arrived.
+        void StartSource(bool fromPhone)
+        {
+            m_FromPhone = fromPhone;
+            m_HasImage = false;
+            m_Screen.enabled = false;
+            var material = m_Screen.material;
+            material.mainTextureScale = Vector2.one;
+            material.mainTextureOffset = Vector2.zero;
+            if (fromPhone)
             {
-                m_Fusion.SetMode(HeadPoseFusion.Mode.SixDof);
+                if (PhoneCamera.Instance != null)
+                    PhoneCamera.Instance.Acquire(this);
+                else
+                    Debug.LogWarning("[Passthrough] No phone camera in the scene");
+            }
+            else
+            {
+                if (m_Texture != null)
+                    material.mainTexture = m_Texture;
                 m_CameraManager.frameReceived += OnCameraFrame;
+            }
+            m_PoseDriver.enabled = !fromPhone;
+            m_Fusion.EyesAtCamera = !fromPhone;
+        }
+
+        void StopSource()
+        {
+            if (m_FromPhone)
+            {
+                if (PhoneCamera.Instance != null)
+                    PhoneCamera.Instance.Release(this);
             }
             else
             {
                 m_CameraManager.frameReceived -= OnCameraFrame;
             }
-
-            m_PoseDriver.enabled = on;
-            m_Fusion.EyesAtCamera = on;
-            if (m_Rig != null)
-                m_Rig.MonoEyes = on;
-            // Shown once the first image has arrived.
-            m_Screen.enabled = on && m_HasImage;
-            VirtualEnvironment.SetAllHidden(on);
-            if (m_Toggle != null)
-                m_Toggle.Selected = on;
-            ShowZoom();
-            Debug.Log(on ? $"[Passthrough] On, {(m_Fill ? "filling the view" : "at true scale")}, zoom {Zoom}x" : "[Passthrough] Off");
+            m_PoseDriver.enabled = false;
+            m_Fusion.EyesAtCamera = false;
+            m_Screen.enabled = false;
         }
 
         void OnCameraFrame(ARCameraFrameEventArgs args)
@@ -494,30 +555,26 @@ namespace CardboardXR.Stereo
             // In the single phone view the view takes the camera's own pose, the one the image was taken
             // from, so the image sits still on the screen instead of shaking between the fused head
             // pose and each frame's (HeadPoseFusion.FollowPose). In the viewer it stays fused.
-            var follow = m_On && m_Rig != null && m_Rig.IsMono ? m_ArCamera.transform : null;
+            var follow = m_On && !m_FromPhone && m_Rig != null && m_Rig.IsMono ? m_ArCamera.transform : null;
             if (m_Fusion.FollowPose != follow)
             {
                 m_Fusion.FollowPose = follow;
                 Debug.Log(follow != null ? "[Passthrough] Phone view: the view follows the camera's pose" :
                     "[Passthrough] The view follows the fused head pose");
             }
-            var sixDof = m_Fusion.CurrentMode == HeadPoseFusion.Mode.SixDof;
             if (!m_On)
-            {
-                if (m_ResumeWithSixDof && sixDof)
-                {
-                    m_ResumeWithSixDof = false;
-                    SetPassthrough(true);
-                }
                 return;
-            }
-            // Switching to 3DoF turns ARCore, and so the camera, off.
-            if (!sixDof)
+            // 3DoF and 6DoF each have their own camera.
+            var threeDof = m_Fusion.CurrentMode == HeadPoseFusion.Mode.ThreeDof;
+            if (threeDof != m_FromPhone)
             {
-                SetPassthrough(false);
-                m_ResumeWithSixDof = true;
-                return;
+                StopSource();
+                StartSource(threeDof);
+                ShowZoom();
+                Debug.Log($"[Passthrough] Now from {(threeDof ? "the phone's camera (3DoF)" : "ARCore's camera (6DoF)")}");
             }
+            if (m_FromPhone)
+                TakePhoneImage();
             if (!m_HasImage)
                 return;
 
@@ -539,13 +596,43 @@ namespace CardboardXR.Stereo
             PlaceScreen();
         }
 
+        // The phone camera's latest image on the screen, and its frustum and zoom window: the texture
+        // holds the whole image, so the window is chosen by the screen's texture coordinates.
+        void TakePhoneImage()
+        {
+            var camera = PhoneCamera.Instance;
+            if (camera == null || !camera.HasImage || camera.Image == null)
+                return;
+            var material = m_Screen.material;
+            if (material.mainTexture != camera.Image)
+                material.mainTexture = camera.Image;
+            var tangents = camera.ImageTangents;
+            m_FrustumSize = 2f * tangents;
+            m_FrustumCenter = Vector2.zero;
+            m_WindowZoom = Zoom;
+            ZoomWindow(m_FrustumSize, m_FrustumCenter, m_WindowZoom, out m_WindowLo, out m_WindowHi);
+            material.mainTextureScale = m_WindowHi - m_WindowLo;
+            material.mainTextureOffset = m_WindowLo;
+            if (m_HasImage)
+                return;
+            m_HasImage = true;
+            m_Screen.enabled = true;
+            Debug.Log($"[Passthrough] Phone camera image {camera.Image.width}x{camera.Image.height}, lens {camera.CurrentLens.Label}, " +
+                      $"{2f * Mathf.Atan(tangents.x) * Mathf.Rad2Deg:F0} x {2f * Mathf.Atan(tangents.y) * Mathf.Rad2Deg:F0} deg");
+        }
+
         // Places the screen for the window shown, turned on by the head's turn since its image when
         // it's enlarged. Each frame, and again whenever the head moves, the last time just before
-        // drawing (HeadPoseFusion.PoseUpdated).
+        // drawing (HeadPoseFusion.PoseUpdated in 6DoF, GyroHeadTracker.PoseUpdated in 3DoF).
         void PlaceScreen()
         {
             if (!m_On || !m_HasImage)
                 return;
+            if (m_FromPhone)
+            {
+                PlacePhoneScreen();
+                return;
+            }
             var turn = Quaternion.identity;
             // The phone view follows the camera's own pose, so the head never turns from the image's.
             if (m_Magnification > 1.0001f && m_HasTrackerAtImage && m_Fusion.FollowPose == null)
@@ -553,6 +640,21 @@ namespace CardboardXR.Stereo
             var d = m_ShownDistance;
             var screen = m_Screen.transform;
             screen.SetLocalPositionAndRotation(turn * new Vector3(m_ShownCenter.x * d, m_ShownCenter.y * d, d), turn);
+            screen.localScale = new Vector3(m_ShownSize.x * d, m_ShownSize.y * d, 1f);
+        }
+
+        // In 3DoF the screen goes around the head, where the head was when the image was taken (or
+        // turned on from there by MagnifiedTurn when enlarged): the AR camera it hangs from doesn't move.
+        void PlacePhoneScreen()
+        {
+            var camera = PhoneCamera.Instance;
+            var head = m_Fusion.transform;
+            var rotation = head.rotation;
+            if (camera != null && camera.TryGetHeadTurnSince(camera.ImageTimestampNs, out var sinceImage))
+                rotation = head.rotation * Quaternion.Inverse(sinceImage) * MagnifiedTurn(sinceImage, m_Magnification);
+            var d = m_ShownDistance;
+            var screen = m_Screen.transform;
+            screen.SetPositionAndRotation(head.position + rotation * new Vector3(m_ShownCenter.x * d, m_ShownCenter.y * d, d), rotation);
             screen.localScale = new Vector3(m_ShownSize.x * d, m_ShownSize.y * d, 1f);
         }
     }

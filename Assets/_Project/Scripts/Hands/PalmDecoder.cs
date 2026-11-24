@@ -75,6 +75,54 @@ namespace CardboardXR.Hands
             return true;
         }
 
+        // Up to max palms reaching minScore, best first, each at least half a palm's size from those
+        // before it (the anchors around one palm all score it), into palms.
+        public static void DecodeTop(float[] boxes, float[] scores, Vector2[] anchors, float minScore, int max,
+            System.Collections.Generic.List<Palm> palms)
+        {
+            palms.Clear();
+            var minLogit = Mathf.Log(minScore / (1f - minScore));
+            var candidates = new System.Collections.Generic.List<int>();
+            for (var i = 0; i < AnchorCount; i++)
+            {
+                if (scores[i] >= minLogit)
+                    candidates.Add(i);
+            }
+            candidates.Sort((a, b) => scores[b].CompareTo(scores[a]));
+            foreach (var i in candidates)
+            {
+                var palm = Decode(boxes, anchors, i, Sigmoid(scores[i]));
+                var separate = true;
+                foreach (var kept in palms)
+                {
+                    if (Vector2.Distance(kept.center, palm.center) < 0.5f * Mathf.Max(kept.size.x, kept.size.y))
+                    {
+                        separate = false;
+                        break;
+                    }
+                }
+                if (!separate)
+                    continue;
+                palms.Add(palm);
+                if (palms.Count >= max)
+                    return;
+            }
+        }
+
+        static Palm Decode(float[] boxes, Vector2[] anchors, int i, float score)
+        {
+            var anchor = anchors[i];
+            var o = i * ValuesPerAnchor;
+            return new Palm
+            {
+                score = score,
+                center = anchor + new Vector2(boxes[o], boxes[o + 1]) / InputSize,
+                size = new Vector2(boxes[o + 2], boxes[o + 3]) / InputSize,
+                wrist = anchor + new Vector2(boxes[o + k_WristOffset], boxes[o + k_WristOffset + 1]) / InputSize,
+                middleKnuckle = anchor + new Vector2(boxes[o + k_MiddleKnuckleOffset], boxes[o + k_MiddleKnuckleOffset + 1]) / InputSize,
+            };
+        }
+
         public static float Sigmoid(float x) => 1f / (1f + Mathf.Exp(-x));
     }
 }
