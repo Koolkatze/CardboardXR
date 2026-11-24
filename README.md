@@ -110,6 +110,7 @@ phone's home screen. The app logs the options it received at startup (`[Stereo] 
 | `pinch 0` | Pinch-to-click off in 3DoF, for measuring its heat (it's otherwise always on) |
 | `dof 3` | Start the lobby in 3DoF, with no room scan (it starts in 6DoF passthrough otherwise) |
 | `passthrough 1` | Start with the camera passthrough view |
+| `passthroughFill 0` | Passthrough at true scale, a window with a border, instead of enlarged to fill the view |
 | `mono 1` | One full-screen view with no lens distortion, for use without a viewer |
 | `boundaryCm N` | Turn on the boundary warning: in VR, a grid on real surfaces within N cm |
 | `arView 1` | Debug view: the AR camera full screen with every detected surface drawn (forces 6DoF) |
@@ -194,7 +195,8 @@ phone's home screen. The app logs the options it received at startup (`[Stereo] 
   through the door behind; walk back through to return. It's in passthrough, so all of it is flat.
 - **The settings panel**, in every scene: hold a hand up with its palm toward you and a gear button
   appears between your thumb and index finger; pinch to open the panel in front of you. It has
-  *Apps* (the app library), *Recenter* and *Scan Room* (in 6DoF: scans again, or ends a scan), and the toggles *6DoF* and *Passthrough*. It follows
+  *Apps* (the app library), *Recenter* and *Scan Room* (in 6DoF: scans again, or ends a scan), the toggles *6DoF* and *Passthrough*, and,
+  while passthrough is on, its digital zoom (*1x*, *2x*, *3x*, *6x*: each pinch the next; kept between runs). It follows
   you lazily as you turn; the *X* below it closes it. Look at a button and tap the screen, or
   pinch. Holding a tap recenters.
 - **Surfaces** are found by the lobby's scan at launch, which runs until it finds nothing new. When

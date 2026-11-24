@@ -24,6 +24,18 @@ There's one camera, so passthrough is one image, the same in both eyes, drawn at
 gives no sense of depth, and how far the hand is from a virtual object can't be judged by eye. A
 cube turns cyan when a pinch would grab it, to make up for that.
 
+### Passthrough is enlarged
+
+The phone's camera sees less than a Cardboard eye, so at true
+scale the image is a window with a black border around it. By default it's enlarged about straight
+ahead until it fills the view (`[Passthrough] Enlarged N x` in the log), and the digital zoom (2x,
+3x, 6x) enlarges it further. The room then looks bigger and nearer than it is, turning the head moves
+it faster than the head turns, and the virtual things drawn over it (panels, cubes)
+line up with it only straight ahead, under the reticle; further out they're nearer the middle than the
+real things they sit on. Zoomed in, the picture is the camera's own pixels, so 6x is soft. Pinches
+aren't affected: they're seen in the camera image, whatever is shown. The launch option
+`passthroughFill 0` puts it back at true scale.
+
 ### Surfaces found after the floor are missed
 
 Surface detection runs until the floor is found and a few seconds more, then stops to leave the

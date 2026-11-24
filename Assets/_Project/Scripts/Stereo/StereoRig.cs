@@ -78,6 +78,26 @@ namespace CardboardXR.Stereo
             }
         }
 
+        // How far the view reaches from straight ahead, as tangents: left, right, bottom, top. Both
+        // eyes' lens frusta together through the viewer (each eye sees further to its own side), or the
+        // single full-screen view in mono. PassthroughController fills it with the camera image.
+        public Vector4 FieldOfViewTangents
+        {
+            get
+            {
+                if (m_Mono || m_Lens == null)
+                {
+                    var vertical = Mathf.Tan(m_MonoFieldOfView * 0.5f * Mathf.Deg2Rad);
+                    var horizontal = vertical * Screen.width / Mathf.Max(1f, Screen.height);
+                    return new Vector4(horizontal, horizontal, vertical, vertical);
+                }
+                var left = m_Lens.GetFieldOfView(Eye.Left);
+                var right = m_Lens.GetFieldOfView(Eye.Right);
+                return new Vector4(Mathf.Tan(Mathf.Max(left.x, right.x)), Mathf.Tan(Mathf.Max(left.y, right.y)),
+                    Mathf.Tan(Mathf.Max(left.z, right.z)), Mathf.Tan(Mathf.Max(left.w, right.w)));
+            }
+        }
+
         public ViewerParams Viewer
         {
             get => m_Viewer;

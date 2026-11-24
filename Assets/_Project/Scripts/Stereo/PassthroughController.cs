@@ -12,9 +12,15 @@ namespace CardboardXR.Stereo
     // of the AR camera shows it to both eyes at the angle the camera saw it, so the room appears at
     // true scale. The AR camera's pose driver moves it only with each new ARCore pose, which comes
     // with each new image, so the picture stays fixed to the room as the head turns and only its
-    // edges trail. The camera sees less than a Cardboard eye, so the image is a window with a dark
-    // border. Passthrough needs 6DoF, since ARCore must run, and hides the virtual environment (every
-    // VirtualEnvironment, in whichever scene).
+    // edges trail. The camera sees less than a Cardboard eye, so at true scale the image is a window
+    // with a dark border; by default it's enlarged about straight ahead until it fills the view
+    // (FillZoom), at the price of the room looking that much bigger and virtual things lining up with
+    // it only straight ahead, under the reticle. The "passthroughFill" launch option (0) keeps it at
+    // true scale. The panel's Zoom button (shown while passthrough is on) steps a digital zoom on top
+    // of that, 1x, 2x, 3x and 6x (kept between runs): only the part of the camera image around
+    // straight ahead is drawn into the texture (ZoomWindow), at its full resolution, so zooming in
+    // sharpens what it can. Passthrough needs 6DoF, since ARCore must run, and hides the virtual
+    // environment (every VirtualEnvironment, in whichever scene).
     // Switching to 3DoF turns it off until 6DoF is back. The "passthrough" launch option (1) starts
     // with it on. While it's on, the eyes move onto the camera (HeadPoseFusion.EyesAtCamera), so the
     // image is seen from where it was taken. The image is flat, so things in it only line up in both
@@ -31,6 +37,11 @@ namespace CardboardXR.Stereo
         const float k_MinDistance = 0.2f;
         // How quickly the image follows a change of focus: most of the way in this many seconds.
         const float k_FocusSeconds = 0.25f;
+        // The most the image is enlarged to fill the view, however narrow the camera.
+        public const float k_MaxFill = 3f;
+        // The Zoom button's steps, on top of filling the view.
+        public static readonly int[] k_ZoomSteps = { 1, 2, 3, 6 };
+        const string k_ZoomKey = "PassthroughZoom";
 
         [SerializeField] HeadPoseFusion m_Fusion;
         [Tooltip("The stereo rig: its eyes move together while passthrough is on, so nothing drawn has " +
@@ -42,6 +53,8 @@ namespace CardboardXR.Stereo
         [SerializeField] Renderer m_Screen;
         [Tooltip("The panel's toggle, shown selected while passthrough is on.")]
         [SerializeField] M3Button m_Toggle;
+        [Tooltip("The panel's Zoom button, shown while passthrough is on: steps through k_ZoomSteps.")]
+        [SerializeField] M3Button m_ZoomButton;
         [Tooltip("How far in front of the camera the image is shown without a focus. It's one flat image, so everything in it appears at this depth.")]
         [SerializeField] float m_Distance = 2f;
         [Tooltip("Height of the passthrough texture in pixels; its width follows the camera image's shape.")]
@@ -62,6 +75,13 @@ namespace CardboardXR.Stereo
         Vector2 m_FrustumCenter;
         Vector2 m_FrustumSize;
         bool m_HasImage;
+        bool m_Fill = true;
+        int m_ZoomIndex;
+        float m_LoggedFill;
+        // The part of the image the texture holds, in its screen UV, and the zoom it was drawn for.
+        Vector2 m_WindowLo;
+        Vector2 m_WindowHi = Vector2.one;
+        float m_WindowZoom = 1f;
         float? m_FocusDistance;
         float m_ShownDistance;
 
@@ -84,6 +104,88 @@ namespace CardboardXR.Stereo
             m_CameraManager = m_ArCamera.GetComponent<ARCameraManager>();
             m_PoseDriver = m_ArCamera.GetComponent<TrackedPoseDriver>();
             m_ShownDistance = m_Distance;
+            m_Fill = LaunchOptions.GetInt("passthroughFill", 1) != 0;
+            m_ZoomIndex = Mathf.Clamp(PlayerPrefs.GetInt(k_ZoomKey, 0), 0, k_ZoomSteps.Length - 1);
+            ShowZoom();
+        }
+
+        // The digital zoom now, on top of filling the view.
+        public int Zoom => k_ZoomSteps[m_ZoomIndex];
+
+        // The Zoom button: the next step, back to 1x after the last.
+        public void NextZoom()
+        {
+            m_ZoomIndex = (m_ZoomIndex + 1) % k_ZoomSteps.Length;
+            PlayerPrefs.SetInt(k_ZoomKey, m_ZoomIndex);
+            PlayerPrefs.Save();
+            ShowZoom();
+            Debug.Log($"[Passthrough] Zoom {Zoom}x");
+        }
+
+        void ShowZoom()
+        {
+            if (m_ZoomButton == null)
+                return;
+            m_ZoomButton.Text = $"{Zoom}x";
+            m_ZoomButton.gameObject.SetActive(m_On);
+        }
+
+        // How much the image is enlarged about straight ahead to cover the view: the camera's frustum
+        // at unit distance (its size and middle, as tangents) against the view's reach (tangents left,
+        // right, bottom, top, StereoRig.FieldOfViewTangents). Enlarging about straight ahead keeps
+        // what's there, under the reticle, where it really is. At least 1, at most k_MaxFill.
+        public static float FillZoom(Vector2 frustumSize, Vector2 frustumCenter, Vector4 view)
+        {
+            var half = frustumSize / 2f;
+            if (half.x <= 0f || half.y <= 0f)
+                return 1f;
+            var across = Mathf.Max(Needed(view.x, half.x - frustumCenter.x), Needed(view.y, half.x + frustumCenter.x));
+            var up = Mathf.Max(Needed(view.z, half.y - frustumCenter.y), Needed(view.w, half.y + frustumCenter.y));
+            return Mathf.Clamp(Mathf.Max(across, up), 1f, k_MaxFill);
+
+            // An edge this far from straight ahead reaching that far out.
+            static float Needed(float reach, float edge) => edge > 0f ? reach / edge : float.PositiveInfinity;
+        }
+
+        // The part of the image a digital zoom shows, from lo to hi in its screen UV: 1/zoom of it each
+        // way, around straight ahead (kept inside the image).
+        public static void ZoomWindow(Vector2 frustumSize, Vector2 frustumCenter, float zoom, out Vector2 lo, out Vector2 hi)
+        {
+            var span = 1f / Mathf.Max(1f, zoom);
+            var aheadX = frustumSize.x > 0f ? 0.5f - frustumCenter.x / frustumSize.x : 0.5f;
+            var aheadY = frustumSize.y > 0f ? 0.5f - frustumCenter.y / frustumSize.y : 0.5f;
+            lo = new Vector2(Mathf.Clamp(aheadX - span / 2f, 0f, 1f - span), Mathf.Clamp(aheadY - span / 2f, 0f, 1f - span));
+            hi = lo + new Vector2(span, span);
+        }
+
+        // Where the screen goes, at unit distance, to show the window lo to hi of the image enlarged
+        // by magnification about straight ahead: its middle and size, as tangents.
+        public static void ShownRect(Vector2 frustumSize, Vector2 frustumCenter, Vector2 lo, Vector2 hi, float magnification,
+            out Vector2 center, out Vector2 size)
+        {
+            center = new Vector2(
+                magnification * (frustumCenter.x + ((lo.x + hi.x) / 2f - 0.5f) * frustumSize.x),
+                magnification * (frustumCenter.y + ((lo.y + hi.y) / 2f - 0.5f) * frustumSize.y));
+            size = new Vector2(magnification * (hi.x - lo.x) * frustumSize.x, magnification * (hi.y - lo.y) * frustumSize.y);
+        }
+
+        // The display transform showing only the part of the widened image from lo to hi (in its screen
+        // UV), stretched over the whole of screen UV 0 to 1: the middle of it, for a digital zoom.
+        public static Matrix4x4 CropDisplayTransform(Matrix4x4 widened, Vector2 lo, Vector2 hi)
+        {
+            var c0 = new Vector2(widened.m00, widened.m01);
+            var c1 = new Vector2(widened.m10, widened.m11);
+            var c2 = new Vector2(widened.m20, widened.m21);
+            var size = hi - lo;
+            var cropped = widened;
+            cropped.m00 = c0.x * size.x;
+            cropped.m01 = c0.y * size.x;
+            cropped.m10 = c1.x * size.y;
+            cropped.m11 = c1.y * size.y;
+            var offset = lo.x * c0 + lo.y * c1 + c2;
+            cropped.m20 = offset.x;
+            cropped.m21 = offset.y;
+            return cropped;
         }
 
         // After the other components' OnEnable, so the mode set here sticks.
@@ -145,7 +247,8 @@ namespace CardboardXR.Stereo
             VirtualEnvironment.SetAllHidden(on);
             if (m_Toggle != null)
                 m_Toggle.Selected = on;
-            Debug.Log(on ? "[Passthrough] On" : "[Passthrough] Off");
+            ShowZoom();
+            Debug.Log(on ? $"[Passthrough] On, {(m_Fill ? "filling the view" : "at true scale")}, zoom {Zoom}x" : "[Passthrough] Off");
         }
 
         void OnCameraFrame(ARCameraFrameEventArgs args)
@@ -167,19 +270,25 @@ namespace CardboardXR.Stereo
             }
             for (var i = 0; i < args.textures.Count; i++)
                 m_CameraMaterial.SetTexture(args.propertyNameIds[i], args.textures[i]);
-            m_CameraMaterial.SetMatrix(k_DisplayTransformId, widened);
-
-            var size = max - min;
-            EnsureTexture(Screen.width * size.x / (Screen.height * size.y));
-            DrawCameraImage();
 
             // Screen UV maps to NDC as 2uv - 1, which ARCore's projection maps to camera space at unit
             // distance as (ndc + p02) / p00 across and (ndc + p12) / p11 up.
+            var size = max - min;
             var projection = args.projectionMatrix.Value;
             m_FrustumSize = new Vector2(2f * size.x / projection.m00, 2f * size.y / projection.m11);
             m_FrustumCenter = new Vector2(
                 (min.x + max.x - 1f + projection.m02) / projection.m00,
                 (min.y + max.y - 1f + projection.m12) / projection.m11);
+
+            // Zoomed, only the window around straight ahead is drawn, filling the texture: the zoom
+            // costs no texture resolution. LateUpdate places the screen for the window drawn here.
+            m_WindowZoom = Zoom;
+            ZoomWindow(m_FrustumSize, m_FrustumCenter, m_WindowZoom, out m_WindowLo, out m_WindowHi);
+            m_CameraMaterial.SetMatrix(k_DisplayTransformId,
+                m_WindowZoom > 1f ? CropDisplayTransform(widened, m_WindowLo, m_WindowHi) : widened);
+
+            EnsureTexture(Screen.width * size.x / (Screen.height * size.y));
+            DrawCameraImage();
             if (m_HasImage)
                 return;
 
@@ -379,9 +488,18 @@ namespace CardboardXR.Stereo
             var step = 1f - Mathf.Exp(-Time.unscaledDeltaTime / k_FocusSeconds);
             m_ShownDistance = Mathf.Exp(Mathf.Lerp(Mathf.Log(m_ShownDistance), Mathf.Log(target), step));
             var d = m_ShownDistance;
+            // The window drawn (OnCameraFrame) enlarged by fill x zoom about straight ahead: as large as
+            // the whole image enlarged to fill, whatever the zoom.
+            var fill = m_Fill && m_Rig != null ? FillZoom(m_FrustumSize, m_FrustumCenter, m_Rig.FieldOfViewTangents) : 1f;
+            if (Mathf.Abs(fill - m_LoggedFill) > 0.01f)
+            {
+                m_LoggedFill = fill;
+                Debug.Log($"[Passthrough] Enlarged {fill:F2}x to fill the view");
+            }
+            ShownRect(m_FrustumSize, m_FrustumCenter, m_WindowLo, m_WindowHi, fill * m_WindowZoom, out var center, out var shownSize);
             var screen = m_Screen.transform;
-            screen.SetLocalPositionAndRotation(new Vector3(m_FrustumCenter.x * d, m_FrustumCenter.y * d, d), Quaternion.identity);
-            screen.localScale = new Vector3(m_FrustumSize.x * d, m_FrustumSize.y * d, 1f);
+            screen.SetLocalPositionAndRotation(new Vector3(center.x * d, center.y * d, d), Quaternion.identity);
+            screen.localScale = new Vector3(shownSize.x * d, shownSize.y * d, 1f);
         }
     }
 }
