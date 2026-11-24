@@ -43,6 +43,9 @@ namespace CardboardXR.Demos
         public const int k_Up = 1;
         public const int k_Move = 2;
         public const int k_Cancel = 3;
+        // How far, in the display's pixels, the gaze must move a held touch before it drags: about a
+        // degree, more than the head's tremor, so holding still long-presses.
+        const float k_SlopPixels = 28f;
         const int k_KeyBack = 4;
         public const float k_MinScale = 0.4f;
         public const float k_MaxScale = 3f;
@@ -82,6 +85,10 @@ namespace CardboardXR.Demos
         string m_Label;
         string m_LastStatus;
         Vector2 m_LastTouch;
+        // Where the touch went down, and whether it has moved past the slop since: until it has, it
+        // stays still, so a held pinch or tap is a long press rather than the gaze's tremor dragging.
+        Vector2 m_DownTouch;
+        bool m_TouchMoved;
         float m_NextPoll;
         // How big it is against its usual size, and where it's headed while a hand moves or resizes it.
         float m_Scale = 1f;
@@ -341,8 +348,13 @@ namespace CardboardXR.Demos
             return core == null || m_Panel == null ? Vector3.forward : (m_Panel.position - core.Head.position).normalized;
         }
 
-        // AppScreenSurface and AppScreenHandle: a pinch on them is held, or let go.
-        public void SetPinchHeld(bool held) => m_PinchHeld = held;
+        // AppScreenSurface and AppScreenHandle: a pinch on them is held, or let go. While it's held the
+        // pinch sensor looks for a second hand, for a two-handed pinch.
+        public void SetPinchHeld(bool held)
+        {
+            m_PinchHeld = held;
+            Hands.PinchSensor.WantsSecondHand = held;
+        }
 
         // The handle was pinched (byHand, so the pinching hand moves it if it's seen) or tapped and held
         // (the gaze moves it).
@@ -451,6 +463,21 @@ namespace CardboardXR.Demos
             else if (action == k_Down)
             {
                 return;
+            }
+            if (action == k_Down)
+            {
+                m_DownTouch = point;
+                m_TouchMoved = false;
+            }
+            else if (!m_TouchMoved)
+            {
+                // The slop grows with the screen, so it's about the same angle of gaze.
+                if ((point - m_DownTouch).magnitude < k_SlopPixels * Mathf.Max(1f, m_Scale) && action == k_Move)
+                    return;
+                if (action == k_Move)
+                    m_TouchMoved = true;
+                else
+                    point = m_DownTouch;
             }
             if (action == k_Move && (point - m_LastTouch).sqrMagnitude < 1f)
                 return;

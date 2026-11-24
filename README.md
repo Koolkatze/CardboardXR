@@ -206,7 +206,9 @@ phone's home screen. The app logs the options it received at startup (`[Stereo] 
   more than one rear lens: the real lenses by their zoom, such as *0.5x*, *1x*, *5x*; each pinch the
   next) and the digital zoom on top (*1x*, *2x*, *3x*, *6x*). Both are kept between runs. It follows
   you lazily as you turn; the *X* below it closes it. Look at a button and tap the screen, or
-  pinch. Holding a tap recenters.
+  pinch. Holding a tap recenters. In 3DoF a pinch is the viewer's button: pressed while your
+  fingertips touch, so a quick pinch clicks and a held pinch holds, as a held tap does (it drags and
+  scrolls, long-presses in a phone app's screen, and recenters when held on nothing).
 - **Surfaces** are found by the lobby's scan at launch, which runs until it finds nothing new. When
   6DoF starts again later (after the 360 Video, say) a shorter scan runs until the floor is found,
   to save CPU for the hand models; the Cube Sandbox scans the whole room if the lobby's didn't.

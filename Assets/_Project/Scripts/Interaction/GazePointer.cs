@@ -126,10 +126,12 @@ namespace CardboardXR.Interaction
             Debug.Log($"[Gaze] Pressed {(m_Target != null ? m_Target.name : "nothing")} {TargetDistance:F2} m away");
         }
 
-        // Releases the press, and clicks if the gaze is still on what was pressed.
-        public void TriggerUp() => Release(click: true);
+        // Releases the press, and clicks if the gaze is still on what was pressed, or, with
+        // clickPressed, what was pressed wherever the gaze is now (a quick pinch, during which the
+        // head may have moved a little), unless a hold or a drag took the press.
+        public void TriggerUp(bool clickPressed = false) => Release(click: true, clickPressed);
 
-        void Release(bool click)
+        void Release(bool click, bool clickPressed = false)
         {
             if (!m_Held)
                 return;
@@ -140,6 +142,9 @@ namespace CardboardXR.Interaction
                 ExecuteEvents.Execute(m_Pressed, eventData, ExecuteEvents.pointerUpHandler);
 
             var clickHandler = m_Target != null ? ExecuteEvents.GetEventHandler<IPointerClickHandler>(m_Target) : null;
+            if (clickPressed && m_Pressed != null && m_Pressed.TryGetComponent<IGazeDrag>(out _) == false &&
+                ExecuteEvents.GetEventHandler<IPointerClickHandler>(m_Pressed) == m_Pressed)
+                clickHandler = m_Pressed;
             if (click && !m_ClickCancelled && eventData.eligibleForClick && m_Pressed != null && m_Pressed == clickHandler)
             {
                 ExecuteEvents.Execute(clickHandler, eventData, ExecuteEvents.pointerClickHandler);

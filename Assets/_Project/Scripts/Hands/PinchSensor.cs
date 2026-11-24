@@ -18,10 +18,14 @@ namespace CardboardXR.Hands
     // So it reads the phone camera's images (PhoneCamera, shared with the passthrough view, from
     // whichever lens is chosen; no ARKit or ARCore) at up to m_ReadsPerSecond, drawn small, runs the
     // same MediaPipe models on them, and a pinch clicks whatever the gaze is on, as a screen tap does.
-    // It follows up to two hands: the palm detector runs while fewer are followed (every
-    // m_SearchInterval with none, m_SecondHandInterval with one), and the landmarker on each followed
-    // hand. The first hand to pinch clicks (PinchRouter); a second pinching while it's held makes a
-    // two-handed pinch (BothPinched), which the app's screen uses to move and resize itself. Each
+    // It follows one hand, and a second only while something can use two (WantsSecondHand, set while
+    // a pinch is held on a phone app's screen): the palm detector runs while fewer are followed (every
+    // m_SearchInterval with none, at once when a pinching hand is lost, m_SecondHandInterval for a
+    // second), and the landmarker on each followed hand. The first hand to pinch presses (PinchRouter:
+    // a pinch is the viewer's button, pressed while the fingers touch, so a quick pinch clicks and a
+    // held one holds, drags and scrolls); a second pinching while it's held makes a two-handed pinch
+    // (BothPinched), which the app's screen uses to move and resize itself. A held pinch survives a
+    // misread result and a moment of the hand going unseen (PinchRule). Each
     // pinch also has a direction in the world (TryGetPinchDirection): where its fingertips were seen,
     // through the image's field of view and the head's rotation when the image was taken. A click
     // wants ~100 ms, not the dragging that made a slower landmarker feel laggy. A hand has to be seen
@@ -43,6 +47,10 @@ namespace CardboardXR.Hands
         public const float k_OpenRatio = 0.8f;
         // A hand must have been seen in more than this many results in a row before a pinch counts.
         public const int k_SteadyResults = 2;
+        // A held pinch opens after this many open results in a row, or after its hand has gone unseen
+        // this long (PinchRule).
+        public const int k_OpenResults = 2;
+        public const float k_LostGraceSeconds = 0.4f;
         const float k_StatusSeconds = 5f;
 
         [SerializeField] HeadPoseFusion m_Fusion;
@@ -78,6 +86,10 @@ namespace CardboardXR.Hands
         }
 
         public static PinchSensor Instance { get; private set; }
+
+        // Whether to look for a second hand: only while a two-handed pinch would do something, as each
+        // hand followed costs a landmarker run, and looking costs detector runs.
+        public static bool WantsSecondHand { get; set; }
 
         readonly Hand[] m_Hands = { new(), new() };
         readonly System.Collections.Generic.List<Palm> m_Palms = new();
@@ -341,7 +353,14 @@ namespace CardboardXR.Hands
             m_Frames++;
             var stopwatch = Stopwatch.StartNew();
 
-            if (followed < k_MaxHands && Time.unscaledTime >= m_NextSearch)
+            var wanted = WantsSecondHand ? k_MaxHands : 1;
+            // A second hand no longer wanted stops being followed, unless it's the one clicking.
+            if (followed > wanted)
+            {
+                Lose(m_Hands[1].Clicks ? m_Hands[0] : m_Hands[1], quietly: true);
+                followed = FollowedCount();
+            }
+            if (followed < wanted && Time.unscaledTime >= m_NextSearch)
             {
                 stopwatch.Restart();
                 var letterbox = Letterbox.Fit(m_Width, m_Height, PalmDecoder.InputSize);
@@ -356,13 +375,16 @@ namespace CardboardXR.Hands
                 m_Detections++;
                 if (!m_Running)
                     return true;
-                PalmDecoder.DecodeTop(m_Boxes, m_Scores, m_Anchors, m_MinPalmScore, k_MaxHands, m_Palms);
+                PalmDecoder.DecodeTop(m_Boxes, m_Scores, m_Anchors, m_MinPalmScore, wanted, m_Palms);
                 foreach (var palm in m_Palms)
                 {
                     var region = HandRegion.FromPalm(palm, letterbox);
                     var free = FreeSlotFor(region);
-                    if (free != null)
-                        free.Region = region;
+                    if (free == null || FollowedCount() >= wanted)
+                        continue;
+                    free.Region = region;
+                    if (free.Rule.IsHeldWhileLost)
+                        Debug.Log("[Pinch] Found the pinching hand again");
                 }
                 followed = FollowedCount();
                 m_NextSearch = Time.unscaledTime + (followed == 0 ? m_SearchInterval : m_SecondHandInterval);
@@ -378,14 +400,15 @@ namespace CardboardXR.Hands
                 if (!m_Running)
                     return true;
             }
-            // Two followed regions that closed in on the same hand: keep one.
+            // Two followed regions that closed in on the same hand: keep the one that clicks.
             if (m_Hands[0].Seen && m_Hands[1].Seen && SameHand(m_Hands[0].Region.Value, m_Hands[1].Region.Value))
-                Lose(m_Hands[1]);
+                Lose(m_Hands[1].Clicks ? m_Hands[0] : m_Hands[1], quietly: true);
             UpdateBothPinched();
             return true;
         }
 
-        // A slot for a newly found palm, unless it's a hand already followed.
+        // A slot for a newly found palm, unless it's a hand already followed: first one whose pinch is
+        // held while it's unseen, so the hold carries on.
         Hand FreeSlotFor(HandRegion region)
         {
             Hand free = null;
@@ -396,17 +419,18 @@ namespace CardboardXR.Hands
                     if (SameHand(hand.Region.Value, region))
                         return null;
                 }
-                else
+                else if (free == null || hand.Rule.IsHeldWhileLost && !free.Rule.IsHeldWhileLost)
                 {
-                    free ??= hand;
+                    free = hand;
                 }
             }
             return free;
         }
 
-        // Regions whose middles are closer than half their size are one hand.
+        // Regions whose middles are closer than 70% of their average size are one hand: the palm
+        // detector's and the landmarks' regions of one hand differ a little.
         public static bool SameHand(HandRegion a, HandRegion b) =>
-            Vector2.Distance(a.center, b.center) < 0.25f * (a.size + b.size);
+            Vector2.Distance(a.center, b.center) < 0.35f * (a.size + b.size);
 
         async Awaitable Landmark(Hand hand, Stopwatch stopwatch)
         {
@@ -434,6 +458,9 @@ namespace CardboardXR.Hands
             if (presence < m_MinHandPresence)
             {
                 Lose(hand);
+                // A pinching hand is looked for again at once, so the hold carries on.
+                if (hand.Rule.IsPinched)
+                    m_NextSearch = Time.unscaledTime;
                 return;
             }
 
@@ -461,14 +488,14 @@ namespace CardboardXR.Hands
                 Debug.Log($"[Pinch] Fingertips {ratio:F2} palm widths apart while the hand turned over; not a pinch");
                 ratio = k_CloseRatio;
             }
-            var change = hand.Rule.Update(true, ratio);
+            var change = hand.Rule.Update(true, ratio, Time.unscaledTime);
             if (change == PinchRule.Change.Closed)
             {
                 m_Pinches++;
                 if (!IsPinched)
                 {
-                    // At the moment of the pinch, as the viewer's button clicks: PinchRouter decides what
-                    // it does, from opening settings to clicking what the gaze is on.
+                    // As the viewer's button touches the screen: PinchRouter decides what it does, from
+                    // opening settings to pressing what the gaze is on until the fingers open.
                     hand.Clicks = true;
                     Debug.Log($"[Pinch] Pinched ({ratio:F2} palm widths)");
                     PinchRouter.Begin(PinchSource.Camera, m_Gaze, false);
@@ -480,6 +507,7 @@ namespace CardboardXR.Hands
             }
             else if (change == PinchRule.Change.Opened)
             {
+                Debug.Log($"[Pinch] Opened ({ratio:F2} palm widths)");
                 EndClick(hand);
             }
         }
@@ -519,17 +547,46 @@ namespace CardboardXR.Hands
             BothPinchedChanged?.Invoke(both);
         }
 
-        void Lose(Hand hand)
+        // The hand went unseen. Its pinch, if held, carries on for k_LostGraceSeconds (PinchRule,
+        // ticked in Update) unless quietly, for a hand that was the other's double, which lets go now.
+        void Lose(Hand hand, bool quietly = false)
         {
             if (hand.Region != null)
                 m_Losses++;
             hand.Region = null;
             hand.Turn.Reset();
-            if (hand.Rule.Update(false, 0f) == PinchRule.Change.Opened)
+            if (quietly)
+            {
+                if (hand.Clicks)
+                    EndClick(hand);
+                hand.Rule.Reset();
+            }
+            else if (hand.Rule.Update(false, 0f, Time.unscaledTime) == PinchRule.Change.Opened)
+            {
                 EndClick(hand);
+            }
+            else if (hand.Rule.IsHeldWhileLost)
+            {
+                Debug.Log("[Pinch] Lost the pinching hand; holding the pinch while looking for it");
+            }
             UpdateBothPinched();
-            if (FollowedCount() == 0)
+            if (FollowedCount() == 0 && !hand.Rule.IsHeldWhileLost)
                 m_NextSearch = Time.unscaledTime + m_SearchInterval;
+        }
+
+        // A pinch held while its hand is unseen lets go once that's lasted k_LostGraceSeconds.
+        void ReleaseLostPinches()
+        {
+            foreach (var hand in m_Hands)
+            {
+                if (hand.Seen || !hand.Rule.IsPinched)
+                    continue;
+                if (hand.Rule.Update(false, 0f, Time.unscaledTime) != PinchRule.Change.Opened)
+                    continue;
+                Debug.Log($"[Pinch] The pinching hand stayed unseen for {k_LostGraceSeconds:F1} s: let go");
+                EndClick(hand);
+                UpdateBothPinched();
+            }
         }
 
         // Without a word, as the sensor stops.
@@ -550,6 +607,8 @@ namespace CardboardXR.Hands
         // from the GPU at a time; a newer frame replaces one not yet taken.
         void Update()
         {
+            if (m_Running)
+                ReleaseLostPinches();
             var camera = PhoneCamera.Instance;
             if (!m_Running || !m_HasCamera || camera == null || !camera.HasImage || camera.Image == null)
                 return;
@@ -673,8 +732,11 @@ namespace CardboardXR.Hands
         }
     }
 
-    // When the fingertip gap makes a pinch: closing below PinchSensor.k_CloseRatio palm widths,
-    // opening above k_OpenRatio, and only for a hand seen in more than k_SteadyResults results in a row.
+    // When the fingertip gap makes a pinch: closing below PinchSensor.k_CloseRatio palm widths, only
+    // for a hand seen in more than k_SteadyResults results in a row; opening above k_OpenRatio in
+    // k_OpenResults results in a row, so one misread of the fingertips doesn't let go of a held pinch;
+    // and a held pinch outlasts its hand going unseen for up to k_LostGraceSeconds (the landmarker
+    // loses a pinching hand now and then, fingertips hidden behind each other), after which it opens.
     public class PinchRule
     {
         public enum Change
@@ -685,36 +747,61 @@ namespace CardboardXR.Hands
         }
 
         int m_Seen;
+        int m_OpenResults;
+        float m_LostSince = float.NaN;
 
         public bool IsPinched { get; private set; }
 
-        // One result: whether a hand was seen, and if so its fingertip gap in palm widths.
-        public Change Update(bool handSeen, float ratio)
+        // Pinched, but the hand isn't seen just now.
+        public bool IsHeldWhileLost => IsPinched && !float.IsNaN(m_LostSince);
+
+        // One result, or a moment without one: whether a hand was seen, and if so its fingertip gap in
+        // palm widths; time in seconds.
+        public Change Update(bool handSeen, float ratio, float time)
         {
             if (!handSeen)
             {
                 m_Seen = 0;
-                var was = IsPinched;
+                m_OpenResults = 0;
+                if (!IsPinched)
+                    return Change.None;
+                if (float.IsNaN(m_LostSince))
+                    m_LostSince = time;
+                if (time - m_LostSince < PinchSensor.k_LostGraceSeconds)
+                    return Change.None;
                 IsPinched = false;
-                return was ? Change.Opened : Change.None;
-            }
-            m_Seen++;
-            if (!IsPinched && ratio < PinchSensor.k_CloseRatio && m_Seen > PinchSensor.k_SteadyResults)
-            {
-                IsPinched = true;
-                return Change.Closed;
-            }
-            if (IsPinched && ratio > PinchSensor.k_OpenRatio)
-            {
-                IsPinched = false;
+                m_LostSince = float.NaN;
                 return Change.Opened;
             }
-            return Change.None;
+            m_LostSince = float.NaN;
+            m_Seen++;
+            if (!IsPinched)
+            {
+                m_OpenResults = 0;
+                if (ratio < PinchSensor.k_CloseRatio && m_Seen > PinchSensor.k_SteadyResults)
+                {
+                    IsPinched = true;
+                    return Change.Closed;
+                }
+                return Change.None;
+            }
+            if (ratio <= PinchSensor.k_OpenRatio)
+            {
+                m_OpenResults = 0;
+                return Change.None;
+            }
+            if (++m_OpenResults < PinchSensor.k_OpenResults)
+                return Change.None;
+            m_OpenResults = 0;
+            IsPinched = false;
+            return Change.Opened;
         }
 
         public void Reset()
         {
             m_Seen = 0;
+            m_OpenResults = 0;
+            m_LostSince = float.NaN;
             IsPinched = false;
         }
     }

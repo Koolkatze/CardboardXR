@@ -49,12 +49,21 @@ namespace CardboardXR.Hands
     // nothing: both sources sometimes see one pinch as two, opening and closing again 0.1-0.3 s apart,
     // which clicked a button two or three times (cycling the video format through three settings).
     // Demo pinches and grabs aren't locked out. Only one source runs at a time (PinchInput hands the
-    // camera over between modes). Logs [Pinch].
+    // camera over between modes). A Camera pinch (3DoF) that clicks is the viewer's button: it presses
+    // what the gaze is on as the fingers close and lets go as they open, so a quick pinch clicks (what
+    // was pressed, even if the gaze slipped off it, within k_PinchClickSeconds) and a held one holds,
+    // as a held tap does: dragging what follows the gaze (IGazeDrag), or recentering when held on
+    // nothing. A Hand pinch (6DoF) clicks at once. Logs [Pinch].
     public static class PinchRouter
     {
         public const float k_ClickLockoutSeconds = 0.35f;
+        // A camera pinch shorter than this clicks what it pressed even if the gaze moved off it.
+        public const float k_PinchClickSeconds = 0.6f;
 
         static IPinchHandler s_Claimed;
+        // The gaze a camera pinch is pressing with, and since when.
+        static GazePointer s_Pressing;
+        static float s_PressedAt;
         static float s_LastClick = float.NegativeInfinity;
 
         // The current scene's taker of pinches, or null. Demos set it on entering and DemoManager
@@ -110,6 +119,19 @@ namespace CardboardXR.Hands
             switch (route)
             {
                 case PinchRoute.Button:
+                case PinchRoute.Click when source == PinchSource.Camera:
+                    if (source == PinchSource.Camera)
+                    {
+                        Debug.Log($"[Pinch] {source} pinch: pressing {name}");
+                        gaze.TriggerDown();
+                        s_Pressing = gaze;
+                        s_PressedAt = now;
+                        break;
+                    }
+                    Debug.Log($"[Pinch] {source} pinch: clicking {name}");
+                    gaze.TriggerDown();
+                    gaze.TriggerUp();
+                    break;
                 case PinchRoute.Click:
                     Debug.Log($"[Pinch] {source} pinch: clicking {name}");
                     gaze.TriggerDown();
@@ -129,9 +151,18 @@ namespace CardboardXR.Hands
             return route;
         }
 
-        // The pinch opened, or its hand was lost: ends a demo's claim on it.
+        // The pinch opened, or its hand was lost: lets go of what a camera pinch pressed, and ends a
+        // demo's claim on it.
         public static void End()
         {
+            var pressing = s_Pressing;
+            s_Pressing = null;
+            if (pressing != null)
+            {
+                var held = Time.unscaledTime - s_PressedAt;
+                pressing.TriggerUp(clickPressed: held < k_PinchClickSeconds);
+                Debug.Log($"[Pinch] Let go after {held * 1000f:F0} ms");
+            }
             var claimed = s_Claimed;
             s_Claimed = null;
             claimed?.EndPinch();

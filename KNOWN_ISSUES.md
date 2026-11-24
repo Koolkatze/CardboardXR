@@ -40,6 +40,15 @@ hand held close is rarely seen: choose a wider lens to use your hands. Following
 landmarker once per hand, so with both in view each is analyzed about half as often, and the screen
 eases after them; it moves and resizes smoothly but a little behind.
 
+### A pinch is seen a little late, and let go a little late
+
+In 3DoF a pinch closes once the hand has been seen in three results in a row with the fingertips
+together, and a held pinch opens only after two results in a row with them apart, or after the hand
+has gone unseen for 0.4 s, so a misread or a moment out of sight doesn't let go of a drag or a long
+press. With the camera at 15 images a second (passthrough off) that's about 0.2 s to press and
+0.15 s to let go; `[Pinch] Pinched`, `Opened` and `Let go after N ms` in the log show each one. A
+second hand is only looked for while a pinch is held on a phone app's screen, for resizing it.
+
 ### Passthrough changes only with each camera image
 
 The picture of the room changes 30 times a second, or 60 on phones whose camera does that for ARCore;
