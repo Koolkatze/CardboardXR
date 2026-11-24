@@ -73,6 +73,14 @@ Android interfaces that a phone maker can change, and the service falls back to 
 commands when one is missing. Android 13 and later get a trusted display any app opens on; before,
 an app that doesn't allow being embedded may refuse.
 
+### Touching an app's screen keeps the phone's focus on CardboardXR
+
+A touch on the app's display would make it the phone's focused display, and CardboardXR, without
+focus, stopped drawing until the phone's own screen was touched. Touches are sent with Android's
+no-focus-change flag (Android 12 and later), and the display is made so it can't take the focus
+(newer Androids). Before Android 14 the display has no focus of its own, so its app doesn't get the
+Back key or a keyboard.
+
 ### What the screen in XR doesn't do
 
 Apps that protect their content (most streaming video, banking) show black, as in a screen

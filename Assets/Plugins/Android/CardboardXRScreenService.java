@@ -74,6 +74,13 @@ public class CardboardXRScreenService extends Binder {
     private static final int FLAG_TOUCH_FEEDBACK_DISABLED = 1 << 13;
     private static final int FLAG_OWN_FOCUS = 1 << 14;
     private static final int FLAG_DEVICE_DISPLAY_GROUP = 1 << 15;
+    // The display never takes the top focus from the phone's own screen when touched (with its own
+    // focus; a newer Android's flag, an unused bit before, and dropped on the next attempt if refused).
+    private static final int FLAG_STEAL_TOP_FOCUS_DISABLED = 1 << 16;
+    // MotionEvent.FLAG_NO_FOCUS_CHANGE (Android 12): a touch that doesn't move focus to the window
+    // touched. Without it, touching the app's display moved the phone's focus there, away from
+    // CardboardXR, whose rendering then stopped until the phone's own screen was touched again.
+    private static final int MOTION_FLAG_NO_FOCUS_CHANGE = 0x40;
     // WindowManager.DISPLAY_IME_POLICY_LOCAL: the keyboard shows on the display it types into.
     private static final int IME_POLICY_LOCAL = 0;
     // UserHandle.USER_CURRENT.
@@ -170,13 +177,15 @@ public class CardboardXRScreenService extends Binder {
         int trusted = Build.VERSION.SDK_INT >= 33 ? FLAG_TRUSTED | FLAG_OWN_DISPLAY_GROUP | FLAG_TOUCH_FEEDBACK_DISABLED : 0;
         int unlocked = Build.VERSION.SDK_INT >= 33 ? FLAG_ALWAYS_UNLOCKED : 0;
         int focus = Build.VERSION.SDK_INT >= 34 ? FLAG_OWN_FOCUS | FLAG_DEVICE_DISPLAY_GROUP : 0;
+        int noSteal = Build.VERSION.SDK_INT >= 34 ? FLAG_STEAL_TOP_FOCUS_DISABLED : 0;
         int[] attempts = {
+            base | trusted | unlocked | focus | noSteal,
             base | trusted | unlocked | focus,
             base | trusted | focus,
             base | trusted,
             base,
         };
-        Exception last = null;
+        RuntimeException last = null;
         for (int flags : attempts) {
             try {
                 m_Display = displays.createVirtualDisplay("CardboardXR", width, height, dpi, surface, flags);
@@ -190,7 +199,7 @@ public class CardboardXRScreenService extends Binder {
                     Log.i(TAG, message);
                     return message;
                 }
-            } catch (SecurityException e) {
+            } catch (RuntimeException e) {
                 Log.w(TAG, "Virtual display flags 0x" + Integer.toHexString(flags) + " not allowed", e);
                 last = e;
             }
@@ -328,8 +337,19 @@ public class CardboardXRScreenService extends Binder {
             m_DownTime = now;
         x = Math.max(0f, Math.min(m_Width - 1, x));
         y = Math.max(0f, Math.min(m_Height - 1, y));
-        MotionEvent event = MotionEvent.obtain(m_DownTime, now, action, x, y, 0);
-        event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        MotionEvent.PointerProperties[] properties = { new MotionEvent.PointerProperties() };
+        properties[0].id = 0;
+        properties[0].toolType = MotionEvent.TOOL_TYPE_FINGER;
+        MotionEvent.PointerCoords[] coords = { new MotionEvent.PointerCoords() };
+        coords[0].x = x;
+        coords[0].y = y;
+        coords[0].pressure = 1f;
+        coords[0].size = 1f;
+        // A finger on the display that leaves the phone's focus on CardboardXR.
+        MotionEvent event = MotionEvent.obtain(m_DownTime, now, action, 1, properties, coords, 0, 0, 1f, 1f, 0, 0,
+                InputDevice.SOURCE_TOUCHSCREEN, MOTION_FLAG_NO_FOCUS_CHANGE);
+        // The input command can't keep focus where it is, so only the hidden method is used for presses
+        // and drags; the command is the last resort for a tap.
         if (!inject(event) && action == MotionEvent.ACTION_UP)
             command("input", "-d", Integer.toString(m_DisplayId), "tap", Integer.toString((int) x), Integer.toString((int) y));
         event.recycle();

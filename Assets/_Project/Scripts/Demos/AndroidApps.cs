@@ -214,7 +214,12 @@ namespace CardboardXR.Demos
         void OnApplicationFocus(bool focused)
         {
             if (!focused)
+            {
+                // CardboardXR stops drawing without focus: a touch on the app's screen used to take it.
+                if (AppScreen.IsOpen)
+                    Debug.LogWarning($"{k_LogTag} CardboardXR lost focus while an app's screen is open");
                 return;
+            }
             if (s_Asking == Asking.OverlaySetting && s_LeftForSetting)
             {
                 s_Asking = Asking.None;
