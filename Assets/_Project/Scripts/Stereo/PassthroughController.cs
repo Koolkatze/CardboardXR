@@ -19,8 +19,13 @@ namespace CardboardXR.Stereo
     // true scale. The panel's Zoom button (shown while passthrough is on) steps a digital zoom on top
     // of that, 1x, 2x, 3x and 6x (kept between runs): only the part of the camera image around
     // straight ahead is drawn into the texture (ZoomWindow), at its full resolution, so zooming in
-    // sharpens what it can. Passthrough needs 6DoF, since ARCore must run, and hides the virtual
-    // environment (every VirtualEnvironment, in whichever scene).
+    // sharpens what it can. A new camera image comes only 30 times a second (60 on some phones), and
+    // at true scale the room in it stays put between images by itself, as the screen holds the
+    // image's pose while the eyes turn. Enlarged, it must turn faster than the head, so between images
+    // the screen is turned on by the head's turn since the image was taken, from the gyroscope
+    // (MagnifiedTurn), just before each frame is drawn; otherwise the room would move with the head
+    // and then jump at every new image. Passthrough needs 6DoF, since ARCore must run, and hides the
+    // virtual environment (every VirtualEnvironment, in whichever scene).
     // Switching to 3DoF turns it off until 6DoF is back. The "passthrough" launch option (1) starts
     // with it on. While it's on, the eyes move onto the camera (HeadPoseFusion.EyesAtCamera), so the
     // image is seen from where it was taken. The image is flat, so things in it only line up in both
@@ -78,6 +83,15 @@ namespace CardboardXR.Stereo
         bool m_Fill = true;
         int m_ZoomIndex;
         float m_LoggedFill;
+        // Where the head tracker had the head when the shown image was taken, if known.
+        readonly CameraClock m_Clock = new("[Passthrough]", "the head tracker's clock");
+        Quaternion m_TrackerAtImage = Quaternion.identity;
+        bool m_HasTrackerAtImage;
+        // The screen's place for the window shown, set each frame: at unit distance, as tangents, and
+        // how much it's enlarged.
+        Vector2 m_ShownCenter;
+        Vector2 m_ShownSize;
+        float m_Magnification = 1f;
         // The part of the image the texture holds, in its screen UV, and the zoom it was drawn for.
         Vector2 m_WindowLo;
         Vector2 m_WindowHi = Vector2.one;
@@ -107,6 +121,7 @@ namespace CardboardXR.Stereo
             m_Fill = LaunchOptions.GetInt("passthroughFill", 1) != 0;
             m_ZoomIndex = Mathf.Clamp(PlayerPrefs.GetInt(k_ZoomKey, 0), 0, k_ZoomSteps.Length - 1);
             ShowZoom();
+            m_Fusion.PoseUpdated += PlaceScreen;
         }
 
         // The digital zoom now, on top of filling the view.
@@ -158,6 +173,20 @@ namespace CardboardXR.Stereo
             hi = lo + new Vector2(span, span);
         }
 
+        // How to turn the screen, in the axes the image was taken in, for an image enlarged by
+        // magnification about straight ahead when the head has turned by headTurn (in those axes)
+        // since: the room in it must turn magnification times as far as the head, against the head,
+        // and turning with the head's eyes already does it once. Nothing at true scale.
+        public static Quaternion MagnifiedTurn(Quaternion headTurn, float magnification)
+        {
+            headTurn.ToAngleAxis(out var angle, out var axis);
+            if (angle > 180f)
+                angle -= 360f;
+            if (Mathf.Abs(angle) < 1e-4f || !(axis.sqrMagnitude > 0.5f && axis.sqrMagnitude < 2f))
+                return Quaternion.identity;
+            return Quaternion.AngleAxis(angle * (1f - magnification), axis);
+        }
+
         // Where the screen goes, at unit distance, to show the window lo to hi of the image enlarged
         // by magnification about straight ahead: its middle and size, as tangents.
         public static void ShownRect(Vector2 frustumSize, Vector2 frustumCenter, Vector2 lo, Vector2 hi, float magnification,
@@ -198,6 +227,8 @@ namespace CardboardXR.Stereo
 
         void OnDestroy()
         {
+            if (m_Fusion != null)
+                m_Fusion.PoseUpdated -= PlaceScreen;
             if (m_On)
                 m_CameraManager.frameReceived -= OnCameraFrame;
             if (m_Texture != null)
@@ -270,6 +301,13 @@ namespace CardboardXR.Stereo
             }
             for (var i = 0; i < args.textures.Count; i++)
                 m_CameraMaterial.SetTexture(args.propertyNameIds[i], args.textures[i]);
+
+            // The head's rotation when the image was taken, for turning it on between images.
+            m_HasTrackerAtImage = false;
+            var tracker = m_Fusion.Tracker;
+            if (args.timestampNs is long cameraNs && tracker != null &&
+                m_Clock.TryToTrackerClock(cameraNs, tracker.NowNs, CameraClock.SystemNowNs(), out var trackerNs))
+                m_HasTrackerAtImage = tracker.TryGetRotationAt(trackerNs, out m_TrackerAtImage);
 
             // Screen UV maps to NDC as 2uv - 1, which ARCore's projection maps to camera space at unit
             // distance as (ndc + p02) / p00 across and (ndc + p12) / p11 up.
@@ -496,10 +534,26 @@ namespace CardboardXR.Stereo
                 m_LoggedFill = fill;
                 Debug.Log($"[Passthrough] Enlarged {fill:F2}x to fill the view");
             }
-            ShownRect(m_FrustumSize, m_FrustumCenter, m_WindowLo, m_WindowHi, fill * m_WindowZoom, out var center, out var shownSize);
+            m_Magnification = fill * m_WindowZoom;
+            ShownRect(m_FrustumSize, m_FrustumCenter, m_WindowLo, m_WindowHi, m_Magnification, out m_ShownCenter, out m_ShownSize);
+            PlaceScreen();
+        }
+
+        // Places the screen for the window shown, turned on by the head's turn since its image when
+        // it's enlarged. Each frame, and again whenever the head moves, the last time just before
+        // drawing (HeadPoseFusion.PoseUpdated).
+        void PlaceScreen()
+        {
+            if (!m_On || !m_HasImage)
+                return;
+            var turn = Quaternion.identity;
+            // The phone view follows the camera's own pose, so the head never turns from the image's.
+            if (m_Magnification > 1.0001f && m_HasTrackerAtImage && m_Fusion.FollowPose == null)
+                turn = MagnifiedTurn(Quaternion.Inverse(m_TrackerAtImage) * m_Fusion.TrackerRotation, m_Magnification);
+            var d = m_ShownDistance;
             var screen = m_Screen.transform;
-            screen.SetLocalPositionAndRotation(new Vector3(center.x * d, center.y * d, d), Quaternion.identity);
-            screen.localScale = new Vector3(shownSize.x * d, shownSize.y * d, 1f);
+            screen.SetLocalPositionAndRotation(turn * new Vector3(m_ShownCenter.x * d, m_ShownCenter.y * d, d), turn);
+            screen.localScale = new Vector3(m_ShownSize.x * d, m_ShownSize.y * d, 1f);
         }
     }
 }

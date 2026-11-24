@@ -136,6 +136,41 @@ namespace CardboardXR.Stereo.Tests
             }
         }
 
+        [Test]
+        public void MagnifiedTurn_TurnsTheRoomAsFastAsItLooks()
+        {
+            // Since the image, the head has turned 3 degrees right, or 2 down. A real point 2 degrees
+            // right of (or above) straight ahead in the image is drawn at magnification x 2 degrees on
+            // the screen; turned on, it must be seen magnification x (2 - 3) degrees from where the head
+            // now points, as if the whole room were enlarged.
+            foreach (var magnification in new[] { 1f, 1.7f, 6f, 10f })
+            {
+                foreach (var axis in new[] { Vector3.up, Vector3.right })
+                {
+                    var headTurn = Quaternion.AngleAxis(3f, axis);
+                    var turn = PassthroughController.MagnifiedTurn(headTurn, magnification);
+                    var onScreen = turn * (Quaternion.AngleAxis(2f * magnification, axis) * Vector3.forward);
+                    var seen = Quaternion.Inverse(headTurn) * onScreen;
+                    var expected = Quaternion.AngleAxis(magnification * (2f - 3f), axis) * Vector3.forward;
+                    Assert.That((seen - expected).magnitude, Is.LessThan(1e-4f), $"{magnification}x about {axis}");
+                }
+            }
+        }
+
+        [Test]
+        public void MagnifiedTurn_LeavesTrueScaleAndAStillHeadAlone()
+        {
+            AssertSameRotation(Quaternion.identity, PassthroughController.MagnifiedTurn(Quaternion.AngleAxis(5f, Vector3.up), 1f));
+            AssertSameRotation(Quaternion.identity, PassthroughController.MagnifiedTurn(Quaternion.identity, 3f));
+            // A turn one way the long way round is the short way back.
+            AssertSameRotation(Quaternion.AngleAxis(4f, Vector3.up),
+                PassthroughController.MagnifiedTurn(Quaternion.AngleAxis(358f, Vector3.up), 3f));
+        }
+
+        static void AssertSameRotation(Quaternion expected, Quaternion actual) =>
+            Assert.That((actual * Vector3.forward - expected * Vector3.forward).magnitude +
+                        (actual * Vector3.up - expected * Vector3.up).magnitude, Is.LessThan(1e-4f), $"expected {expected}, got {actual}");
+
         // The image's edges, enlarged by fill about straight ahead, reach at least the view's edges.
         static void AssertCovers(Vector2 size, Vector2 center, float fill, Vector4 view)
         {

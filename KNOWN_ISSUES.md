@@ -24,13 +24,23 @@ There's one camera, so passthrough is one image, the same in both eyes, drawn at
 gives no sense of depth, and how far the hand is from a virtual object can't be judged by eye. A
 cube turns cyan when a pinch would grab it, to make up for that.
 
+### Passthrough changes only with each camera image
+
+The picture of the room changes 30 times a second, or 60 on phones whose camera does that for ARCore;
+the `[AR]` log line gives the actual rate (`camera N Hz`). What's virtual is drawn at
+the display's rate. Turning the head stays smooth, as the image is held where it was taken (or
+turned on by the gyroscope when enlarged), but things moving in the room, such as a hand, move in
+steps.
+
 ### Passthrough is enlarged
 
 The phone's camera sees less than a Cardboard eye, so at true
 scale the image is a window with a black border around it. By default it's enlarged about straight
 ahead until it fills the view (`[Passthrough] Enlarged N x` in the log), and the digital zoom (2x,
 3x, 6x) enlarges it further. The room then looks bigger and nearer than it is, turning the head moves
-it faster than the head turns, and the virtual things drawn over it (panels, cubes)
+it faster than the head turns (between camera images it's turned on by the gyroscope, so it moves
+smoothly, but turning quickly shows a black edge on the side turned toward, which the image
+doesn't reach yet), and the virtual things drawn over it (panels, cubes)
 line up with it only straight ahead, under the reticle; further out they're nearer the middle than the
 real things they sit on. Zoomed in, the picture is the camera's own pixels, so 6x is soft. Pinches
 aren't affected: they're seen in the camera image, whatever is shown. The launch option

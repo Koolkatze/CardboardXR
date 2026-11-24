@@ -130,6 +130,17 @@ namespace CardboardXR.Stereo
 
         Vector3 CameraToEyes => Vector3.Lerp(m_CameraToEyes, Vector3.zero, m_EyesAtCameraAmount);
 
+        // The head tracker, whose rotation history says how far the head has turned since a camera
+        // image was taken (PassthroughController).
+        public GyroHeadTracker Tracker => m_Tracker;
+
+        // The tracker's rotation the head was last set from, in its own space.
+        public Quaternion TrackerRotation { get; private set; } = Quaternion.identity;
+
+        // Raised each time the head's pose is set in 6DoF, the last time just before rendering, for
+        // anything that must follow it exactly.
+        public event System.Action PoseUpdated;
+
         // A detected real floor's height in ARCore's session space; the world eases to line it up
         // with the virtual floor.
         public void SetFloor(float sessionHeight)
@@ -221,6 +232,7 @@ namespace CardboardXR.Stereo
             // Reading the rotation also feeds the tracker's new samples, and their accelerations, in.
             if (m_Mode != Mode.SixDof || !m_Tracker.TryGetRotation(out var trackerRotation))
                 return;
+            TrackerRotation = trackerRotation;
 
             var nowNs = m_Tracker.NowNs;
             ConsumeArPose(nowNs);
@@ -261,6 +273,7 @@ namespace CardboardXR.Stereo
             // Kept fused while AR has lost track, so the view doesn't freeze.
             if (FollowPose != null && IsArTracking)
                 transform.SetPositionAndRotation(FollowPose.position, FollowPose.rotation);
+            PoseUpdated?.Invoke();
         }
 
         // Eases toward lining the detected floor up with the virtual one. Positions carry
