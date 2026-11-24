@@ -109,8 +109,8 @@ phone's home screen. The app logs the options it received at startup (`[Stereo] 
 | `demo N` | Start in demo N (its index in `Assets/_Project/Demos/DemoCatalog.asset`, from 0) instead of the lobby |
 | `pinch 0` | Pinch-to-click off in 3DoF, for measuring its heat (it's otherwise always on) |
 | `dof 6` | Start the lobby as it once was, in 6DoF passthrough with hand tracking and a room scan (it starts in 3DoF passthrough from the phone's camera otherwise) |
-| `cameraWidth N` | Android, 3DoF: width of the phone camera's stream for passthrough and pinches (default 1280, 16:9) |
-| `cameraFps N` | Android, 3DoF: the phone camera's frame rate, steady where the camera allows (default 30) |
+| `cameraWidth N` | Android, 3DoF: width of the phone camera's stream while passthrough shows it (default 1280, 16:9; 640 when only pinches use it) |
+| `cameraFps N` | Android, 3DoF: the phone camera's frame rate while passthrough shows it, steady where the camera allows (default 30; 15 when only pinches use it) |
 | `passthrough 1` | Start with the camera passthrough view |
 | `passthroughFill 0` | Passthrough at true scale, a window with a border, instead of enlarged to fill the view |
 | `mono 1` | One full-screen view with no lens distortion, for use without a viewer |

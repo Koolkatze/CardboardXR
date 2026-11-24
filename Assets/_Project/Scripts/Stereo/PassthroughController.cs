@@ -313,7 +313,7 @@ namespace CardboardXR.Stereo
             if (fromPhone)
             {
                 if (PhoneCamera.Instance != null)
-                    PhoneCamera.Instance.Acquire(this);
+                    PhoneCamera.Instance.Acquire(this, forDisplay: true);
                 else
                     Debug.LogWarning("[Passthrough] No phone camera in the scene");
             }

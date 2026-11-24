@@ -18,8 +18,9 @@ namespace CardboardXR.Stereo
     // (ImageTangents) and when it was taken (ImageTimestampNs, for turning it with the head between
     // images). It runs while anything has Acquired it, only in 3DoF: just before 6DoF starts it lets
     // go of the camera, which the AR session then takes, and it waits k_HandoffSeconds after 6DoF ends
-    // before opening it again. The "cameraWidth" and "cameraFps" launch options set the stream's size
-    // and rate (1280 wide, 30 fps). Logs [Camera].
+    // before opening it again. For the screen (Acquire with forDisplay) it streams 1280 wide at 30 fps,
+    // which the "cameraWidth" and "cameraFps" launch options change; for the pinch sensor alone, 640
+    // wide at 15 fps, which is all the hand models need and runs cooler. Logs [Camera].
     public class PhoneCamera : MonoBehaviour
     {
         public struct Lens
@@ -54,12 +55,14 @@ namespace CardboardXR.Stereo
         [Tooltip("CardboardXR/CameraYuv: the camera's planes to RGB, turned upright.")]
         [SerializeField] Shader m_Shader;
         [SerializeField] int m_Width = 1280;
-        [SerializeField] int m_Height = 720;
         [SerializeField] int m_Fps = 30;
+        [SerializeField] int m_ModelsWidth = 640;
+        [SerializeField] int m_ModelsFps = 15;
 
         public static PhoneCamera Instance { get; private set; }
 
         readonly HashSet<object> m_Users = new();
+        readonly HashSet<object> m_DisplayUsers = new();
         readonly List<Lens> m_Lenses = new();
         readonly CameraClock m_Clock = new("[Camera]", "the head tracker's clock");
         int m_LensIndex;
@@ -67,6 +70,7 @@ namespace CardboardXR.Stereo
         bool m_Open;
         string m_OpenCameraId;
         float m_OpenZoomRatio;
+        bool m_OpenForDisplay;
         float m_ThreeDofSince;
         float m_RetryAt;
         bool m_AskedPermission;
@@ -110,7 +114,6 @@ namespace CardboardXR.Stereo
         {
             Instance = this;
             m_Width = Mathf.Clamp(LaunchOptions.GetInt("cameraWidth", m_Width), 320, 3840);
-            m_Height = Mathf.RoundToInt(m_Width * 9f / 16f);
             m_Fps = Mathf.Clamp(LaunchOptions.GetInt("cameraFps", m_Fps), 10, 60);
             m_StatusStart = Time.unscaledTime;
         }
@@ -149,12 +152,19 @@ namespace CardboardXR.Stereo
             m_Commands?.Release();
         }
 
-        // Something needs the camera (the passthrough view, the pinch sensor): it runs while anything does.
-        public void Acquire(object user) => m_Users.Add(user);
+        // Something needs the camera (the passthrough view, forDisplay; the pinch sensor): it runs while
+        // anything does, at the screen's size and rate while anything shows it.
+        public void Acquire(object user, bool forDisplay = false)
+        {
+            m_Users.Add(user);
+            if (forDisplay)
+                m_DisplayUsers.Add(user);
+        }
 
         public void Release(object user)
         {
             m_Users.Remove(user);
+            m_DisplayUsers.Remove(user);
             if (m_Users.Count == 0)
                 Close("nothing needs it");
         }
@@ -200,8 +210,12 @@ namespace CardboardXR.Stereo
                 return;
             }
             var lens = CurrentLens;
+            var forDisplay = m_DisplayUsers.Count > 0;
+            // Another size or rate needs the camera opened again.
+            if (m_Open && forDisplay != m_OpenForDisplay)
+                Close(forDisplay ? "the screen needs the full stream" : "only the hand models need it now");
             if (!m_Open || lens.CameraId != m_OpenCameraId || !Mathf.Approximately(lens.ZoomRatio, m_OpenZoomRatio))
-                Open(lens);
+                Open(lens, forDisplay);
             var status = Java.CallStatic<int>("status");
             if (status == k_Failed)
             {
@@ -225,22 +239,26 @@ namespace CardboardXR.Stereo
 #endif
         }
 
-        void Open(Lens lens)
+        void Open(Lens lens, bool forDisplay)
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
             try
             {
+                var width = forDisplay ? m_Width : m_ModelsWidth;
+                var height = Mathf.RoundToInt(width * 9f / 16f);
+                var fps = forDisplay ? m_Fps : m_ModelsFps;
                 using var player = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
                 using var activity = player.GetStatic<AndroidJavaObject>("currentActivity");
-                Java.CallStatic("open", activity, lens.CameraId, lens.ZoomRatio, m_Width, m_Height, m_Fps);
+                Java.CallStatic("open", activity, lens.CameraId, lens.ZoomRatio, width, height, fps);
                 if (!m_Open)
                     m_LastImageTime = Time.unscaledTime;
                 m_Open = true;
+                m_OpenForDisplay = forDisplay;
                 m_OpenCameraId = lens.CameraId;
                 m_OpenZoomRatio = lens.ZoomRatio;
                 m_LoggedFailure = false;
                 Debug.Log($"[Camera] Opening lens {lens.Label} (camera {lens.CameraId}, zoom ratio {lens.ZoomRatio:F2}) " +
-                          $"at about {m_Width}x{m_Height}, {m_Fps} fps");
+                          $"at about {width}x{height}, {fps} fps, for {(forDisplay ? "the screen" : "the hand models")}");
             }
             catch (AndroidJavaException e)
             {
